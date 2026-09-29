@@ -1,11 +1,5 @@
 import { useEffect, useState } from 'react';
-
 import { jsPDF } from 'jspdf';
-
-import {
-  analyzeUrl,
-  ScanAnalysisResult,
-} from '../utils/threatEngine';
 
 interface NeuralUrlScannerProps {
   initialUrl?: string;
@@ -17,18 +11,173 @@ interface NeuralUrlScannerProps {
   ) => void;
 }
 
-type ScanHistoryRecord = {
+type FindingSeverity =
+  | 'CRITICAL'
+  | 'HIGH'
+  | 'SUSPICIOUS'
+  | 'LOW'
+  | 'INFO';
+
+type Finding = {
   id: string;
-  url: string;
-  status: 'Phishing' | 'Suspicious' | 'Safe';
-  risk: number;
-  time: string;
-  source: string;
-  createdAt: string;
+  title: string;
+  severity: FindingSeverity;
+  description: string;
+  icon: string;
 };
 
-const STORAGE_KEY =
-  'phishguard_scan_history';
+type UrlFeature = {
+  id: string;
+  label: string;
+  value: string;
+  description: string;
+  tag: string;
+};
+
+type BackendAnalysis = {
+  url: string;
+  score: number;
+  verdict: 'safe' | 'suspicious' | 'malicious';
+  verdictLabel: string;
+  confidence: string;
+  threatBannerTitle: string;
+  threatBannerDesc: string;
+
+  host: string;
+
+  domainAge: string;
+  domainAgeLabel: string;
+
+  heuristicsPercent: string;
+  heuristicsLabel: string;
+
+  cloneMatchPercent: string;
+  cloneMatchLabel: string;
+
+  findings: Finding[];
+  features: UrlFeature[];
+
+  tlsState: {
+    title: string;
+    trustStatus: string;
+    description: string;
+  };
+
+  targetBrand: string;
+  similarity: string;
+
+  backend: BackendScanResponse;
+};
+
+type BackendScanResponse = {
+  scan_id: number;
+  status: string;
+  message?: string;
+  url: string;
+
+  verdict: 'Legitimate' | 'Suspicious' | 'Phishing';
+
+  risk_score: number;
+  model_probability: number;
+  phishing_probability: number;
+  legitimate_probability: number;
+
+  prediction: number;
+
+  domain_reputation?: string;
+
+  domain_info?: {
+    hostname?: string;
+    registrable_domain?: string;
+    subdomain?: string;
+    tld?: string;
+    scheme?: string;
+
+    is_ip_address?: boolean;
+    dns_resolved?: boolean;
+    ip_address?: string;
+
+    allowlist_match?: string | null;
+
+    brand_impersonation?: {
+      detected?: boolean;
+      brand?: string | null;
+      confidence?: number;
+      legitimate_domain?: string | null;
+      matched_text?: string | null;
+      match_type?: string | null;
+      has_context?: boolean;
+      reason?: string | null;
+    };
+  };
+
+  ssl_analysis?: {
+    certificate_available?: boolean;
+    certificate_valid?: boolean;
+    hostname_match?: boolean;
+    https_enabled?: boolean;
+
+    issuer?: string;
+    subject?: string;
+
+    valid_from?: string;
+    valid_until?: string;
+
+    days_until_expiry?: number | null;
+
+    status?: string;
+  };
+
+  signals?: {
+    ml_model?: string;
+    domain_reputation?: string;
+    suspicious_tld?: string;
+
+    keyword_risk?: string;
+
+    hostname_risk?: string;
+
+    excessive_hyphens?: boolean;
+    excessive_subdomains?: boolean;
+
+    at_symbol?: boolean;
+    encoded_characters?: boolean;
+
+    is_url_shortener?: boolean;
+    non_standard_port?: boolean;
+
+    dns_resolved?: boolean;
+
+    https?: string;
+
+    ssl?: string;
+
+    brand_impersonation?: string;
+  };
+
+  score_breakdown?: Record<
+    string,
+    number
+  >;
+
+  reasons?: string[];
+
+  features?: Record<
+    string,
+    number | string | boolean | string[]
+  >;
+}
+
+const API_URL =
+  'http://127.0.0.1:5000/api/scan';
+
+const getAuthHeaders = (): Record<string, string> => {
+  const token = localStorage.getItem('phishguard_token') || '';
+
+  return token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+};
 
 export default function NeuralUrlScanner({
   initialUrl,
@@ -36,7 +185,6 @@ export default function NeuralUrlScanner({
   onNavigateToTips,
   onShowToast,
 }: NeuralUrlScannerProps) {
-
   const [urlInput, setUrlInput] =
     useState(initialUrl || '');
 
@@ -44,9 +192,7 @@ export default function NeuralUrlScanner({
     useState(false);
 
   const [analysis, setAnalysis] =
-    useState<ScanAnalysisResult | null>(
-      null
-    );
+    useState<BackendAnalysis | null>(null);
 
   const [quarantined, setQuarantined] =
     useState(false);
@@ -62,7 +208,6 @@ export default function NeuralUrlScanner({
   const normalizeUrl = (
     value: string
   ) => {
-
     const trimmed =
       value.trim();
 
@@ -80,176 +225,791 @@ export default function NeuralUrlScanner({
     return trimmed;
   };
 
-  const saveScanToHistory = (
-    result: ScanAnalysisResult
-  ) => {
+  /*
+   * BACKEND RESPONSE → FRONTEND UI
+   */
 
-    try {
+  const convertBackendResult = (
+    data: BackendScanResponse
+  ): BackendAnalysis => {
+    const risk =
+      Number(data.risk_score ?? 0);
 
-      const savedHistory =
-        localStorage.getItem(
-          STORAGE_KEY
-        );
+    const backendVerdict =
+      String(
+        data.verdict || ''
+      ).toLowerCase();
 
-      const existingHistory:
-        ScanHistoryRecord[] =
-        savedHistory
-          ? JSON.parse(savedHistory)
-          : [];
+    const verdict:
+      BackendAnalysis['verdict'] =
+      backendVerdict === 'phishing'
+        ? 'malicious'
+        : backendVerdict === 'suspicious'
+          ? 'suspicious'
+          : 'safe';
 
-      const status:
-        ScanHistoryRecord['status'] =
-        result.verdict === 'malicious'
-          ? 'Phishing'
-          : result.verdict ===
-            'suspicious'
-            ? 'Suspicious'
-            : 'Safe';
+    const verdictLabel =
+      backendVerdict === 'phishing'
+        ? 'Phishing'
+        : backendVerdict === 'suspicious'
+          ? 'Suspicious'
+          : 'Legitimate';
 
-      const now =
-        new Date();
+    const domainInfo =
+      data.domain_info || {};
 
-      const newRecord:
-        ScanHistoryRecord = {
+    const signals =
+      data.signals || {};
 
-        id:
-          `SCAN-${Date.now()
-            .toString()
-            .slice(-8)}`,
+    const reasons =
+      Array.isArray(data.reasons)
+        ? data.reasons
+        : [];
 
-        url:
-          result.url,
+    const findings: Finding[] = [];
 
-        status,
+    /*
+     * BRAND IMPERSONATION
+     */
 
-        risk:
-          result.score,
+    const brand =
+      domainInfo.brand_impersonation;
 
-        time:
-          now.toLocaleString(),
-
-        source:
-          'PhishGuard AI Scanner',
-
-        createdAt:
-          now.toISOString(),
-      };
-
-      const filteredHistory =
-        existingHistory.filter(
-          (record) =>
-            record.url !==
-            result.url
-        );
-
-      const updatedHistory = [
-        newRecord,
-        ...filteredHistory,
-      ].slice(0, 100);
-
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(
-          updatedHistory
-        )
-      );
-
-    } catch {
-
-      // Scanner should continue working
-      // even if localStorage fails.
-
+    if (brand?.detected) {
+      findings.push({
+        id: 'brand-impersonation',
+        title: 'Brand Impersonation Detected',
+        severity: 'CRITICAL',
+        description:
+          brand.reason ||
+          `Possible ${brand.brand || 'brand'} impersonation detected.`,
+        icon: 'branding_watermark',
+      });
     }
 
-  };
+    /*
+     * SUSPICIOUS TLD
+     */
 
-  const handleScan = () => {
+    if (
+      signals.suspicious_tld ===
+      'detected'
+    ) {
+      findings.push({
+        id: 'suspicious-tld',
+        title: 'Suspicious TLD',
+        severity: 'HIGH',
+        description:
+          'The domain uses a TLD associated with elevated phishing risk.',
+        icon: 'language',
+      });
+    }
 
-    const target =
-      normalizeUrl(
-        urlInput
+    /*
+     * KEYWORD RISK
+     */
+
+    if (
+      signals.keyword_risk ===
+      'high'
+    ) {
+      findings.push({
+        id: 'keyword-risk-high',
+        title: 'Phishing Keywords Detected',
+        severity: 'HIGH',
+        description:
+          'Multiple phishing-related keywords were detected in the URL.',
+        icon: 'warning',
+      });
+    } else if (
+      signals.keyword_risk ===
+      'medium'
+    ) {
+      findings.push({
+        id: 'keyword-risk-medium',
+        title: 'Suspicious Keywords',
+        severity: 'SUSPICIOUS',
+        description:
+          'The URL contains keywords commonly associated with account or credential attacks.',
+        icon: 'search',
+      });
+    }
+
+    /*
+     * HYPHENS
+     */
+
+    if (
+      signals.excessive_hyphens
+    ) {
+      findings.push({
+        id: 'hyphens',
+        title: 'Excessive Hyphens',
+        severity: 'SUSPICIOUS',
+        description:
+          'The hostname contains an unusually high number of hyphens.',
+        icon: 'remove',
+      });
+    }
+
+    /*
+     * SUBDOMAINS
+     */
+
+    if (
+      signals.excessive_subdomains
+    ) {
+      findings.push({
+        id: 'subdomains',
+        title: 'Excessive Subdomains',
+        severity: 'SUSPICIOUS',
+        description:
+          'The hostname contains an unusually large number of subdomains.',
+        icon: 'account_tree',
+      });
+    }
+
+    /*
+     * URL SHORTENER
+     */
+
+    if (
+      signals.is_url_shortener
+    ) {
+      findings.push({
+        id: 'shortener',
+        title: 'URL Shortener Detected',
+        severity: 'SUSPICIOUS',
+        description:
+          'The URL uses a known URL shortening service.',
+        icon: 'link',
+      });
+    }
+
+    /*
+     * @ SYMBOL
+     */
+
+    if (
+      signals.at_symbol
+    ) {
+      findings.push({
+        id: 'at-symbol',
+        title: '@ Symbol Detected',
+        severity: 'HIGH',
+        description:
+          'The URL contains an @ symbol, which can be abused to disguise the actual destination.',
+        icon: 'alternate_email',
+      });
+    }
+
+    /*
+     * NON STANDARD PORT
+     */
+
+    if (
+      signals.non_standard_port
+    ) {
+      findings.push({
+        id: 'port',
+        title: 'Non-standard Port',
+        severity: 'SUSPICIOUS',
+        description:
+          'The URL uses a non-standard network port.',
+        icon: 'lan',
+      });
+    }
+
+    /*
+     * ENCODED CHARACTERS
+     */
+
+    if (
+      signals.encoded_characters
+    ) {
+      findings.push({
+        id: 'encoded',
+        title: 'Encoded Characters',
+        severity: 'SUSPICIOUS',
+        description:
+          'Encoded characters were detected in the URL.',
+        icon: 'code',
+      });
+    }
+
+    /*
+     * DNS
+     */
+
+    if (
+      signals.dns_resolved ===
+      false
+    ) {
+      findings.push({
+        id: 'dns',
+        title: 'DNS Resolution Failed',
+        severity: 'SUSPICIOUS',
+        description:
+          'The domain could not be resolved through DNS during the scan.',
+        icon: 'dns',
+      });
+    }
+
+    /*
+     * IP ADDRESS
+     */
+
+    if (
+      domainInfo.is_ip_address
+    ) {
+      findings.push({
+        id: 'ip-host',
+        title: 'IP Address Used as Host',
+        severity: 'HIGH',
+        description:
+          'The URL uses an IP address instead of a normal domain name.',
+        icon: 'router',
+      });
+    }
+
+    /*
+     * HTTP
+     */
+
+    if (
+      domainInfo.scheme ===
+      'http'
+    ) {
+      findings.push({
+        id: 'no-https',
+        title: 'HTTPS Not Enabled',
+        severity: 'SUSPICIOUS',
+        description:
+          'The URL uses HTTP instead of HTTPS.',
+        icon: 'lock_open',
+      });
+    }
+
+    /*
+     * SSL / TLS
+     */
+
+    const ssl =
+      data.ssl_analysis;
+
+    if (
+      ssl?.status ===
+      'hostname_mismatch'
+    ) {
+      findings.push({
+        id: 'ssl-hostname-mismatch',
+        title: 'TLS Hostname Mismatch',
+        severity: 'HIGH',
+        description:
+          'The TLS certificate does not match the requested hostname.',
+        icon: 'gpp_bad',
+      });
+    }
+
+    if (
+      ssl?.status ===
+      'invalid'
+    ) {
+      findings.push({
+        id: 'ssl-invalid',
+        title: 'Invalid TLS Certificate',
+        severity: 'HIGH',
+        description:
+          'The TLS certificate failed certificate validity checks.',
+        icon: 'lock_open',
+      });
+    }
+
+    if (
+      ssl?.status ===
+      'certificate_unavailable'
+    ) {
+      findings.push({
+        id: 'ssl-unavailable',
+        title: 'TLS Certificate Unavailable',
+        severity: 'SUSPICIOUS',
+        description:
+          'A TLS certificate could not be retrieved during analysis.',
+        icon: 'lock',
+      });
+    }
+
+    /*
+     * NO FINDINGS
+     */
+
+    if (
+      findings.length === 0
+    ) {
+      findings.push({
+        id: 'clean',
+        title: 'No Major Suspicious Indicators',
+        severity: 'INFO',
+        description:
+          'No major suspicious URL indicators were detected by the current analysis pipeline.',
+        icon: 'verified',
+      });
+    }
+
+    /*
+     * URL FEATURE ANALYSIS
+     */
+
+    const rawFeatures =
+      data.features || {};
+
+    const features: UrlFeature[] = [
+      {
+        id: 'url-length',
+        label: 'URL Length',
+        value:
+          `${rawFeatures.url_length ?? 0} characters`,
+        description:
+          'Total length of the submitted URL.',
+        tag:
+          Number(
+            rawFeatures.url_length ?? 0
+          ) > 100
+            ? 'HIGH'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'hostname-length',
+        label: 'Hostname Length',
+        value:
+          `${rawFeatures.hostname_length ?? 0} characters`,
+        description:
+          'Length of the hostname portion.',
+        tag:
+          rawFeatures.long_hostname
+            ? 'SUSPICIOUS'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'subdomains',
+        label: 'Subdomains',
+        value:
+          `${rawFeatures.subdomain_count ?? 0}`,
+        description:
+          'Number of detected subdomain levels.',
+        tag:
+          rawFeatures.many_subdomains
+            ? 'SUSPICIOUS'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'hyphens',
+        label: 'Hyphens',
+        value:
+          `${rawFeatures.hyphen_count ?? 0}`,
+        description:
+          'Number of hyphens detected in the URL.',
+        tag:
+          rawFeatures.many_hyphens
+            ? 'SUSPICIOUS'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'digits',
+        label: 'Digits',
+        value:
+          `${rawFeatures.total_digit_count ?? 0}`,
+        description:
+          'Total number of digits detected.',
+        tag:
+          Number(
+            rawFeatures.digit_ratio ?? 0
+          ) > 0.15
+            ? 'SUSPICIOUS'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'keywords',
+        label: 'Phishing Keywords',
+        value:
+          `${rawFeatures.keyword_count ?? 0}`,
+        description:
+          'Number of phishing-related keywords detected.',
+        tag:
+          Number(
+            rawFeatures.keyword_count ?? 0
+          ) >= 3
+            ? 'HIGH'
+            : Number(
+              rawFeatures.keyword_count ?? 0
+            ) > 0
+              ? 'WATCH'
+              : 'NONE',
+      },
+
+      {
+        id: 'tld',
+        label: 'TLD',
+        value:
+          domainInfo.tld
+            ? `.${domainInfo.tld}`
+            : 'Unknown',
+        description:
+          'Top-level domain of the hostname.',
+        tag:
+          rawFeatures.suspicious_tld
+            ? 'SUSPICIOUS'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'https',
+        label: 'HTTPS',
+        value:
+          domainInfo.scheme === 'https'
+            ? 'Enabled'
+            : 'Not enabled',
+        description:
+          'Transport security detected from the submitted URL.',
+        tag:
+          domainInfo.scheme === 'https'
+            ? 'SECURE'
+            : 'WATCH',
+      },
+
+      {
+        id: 'entropy',
+        label: 'URL Entropy',
+        value:
+          `${rawFeatures.url_entropy ?? 0}`,
+        description:
+          'Randomness/complexity measurement of the URL.',
+        tag:
+          Number(
+            rawFeatures.url_entropy ?? 0
+          ) > 4.5
+            ? 'HIGH'
+            : 'NORMAL',
+      },
+
+      {
+        id: 'dns',
+        label: 'DNS Resolution',
+        value:
+          domainInfo.dns_resolved
+            ? 'Resolved'
+            : 'Not Resolved',
+        description:
+          'Whether the hostname resolved through DNS.',
+        tag:
+          domainInfo.dns_resolved
+            ? 'NORMAL'
+            : 'WATCH',
+      },
+    ];
+
+    /*
+     * SSL / TLS UI
+     */
+
+    const tlsState = {
+      title:
+        ssl?.status === 'valid'
+          ? 'TLS Certificate Valid'
+          : ssl?.status ===
+            'hostname_mismatch'
+            ? 'TLS Hostname Mismatch'
+            : ssl?.status ===
+              'invalid'
+              ? 'Invalid TLS Certificate'
+              : domainInfo.scheme ===
+                'https'
+                ? 'TLS Analysis'
+                : 'HTTPS Not Enabled',
+
+      trustStatus:
+        ssl?.status === 'valid'
+          ? 'CERTIFICATE VALID'
+          : ssl?.status
+            ? ssl.status
+              .replace(/_/g, ' ')
+              .toUpperCase()
+            : domainInfo.scheme ===
+              'https'
+              ? 'ANALYSIS AVAILABLE'
+              : 'NOT ENABLED',
+
+      description:
+        ssl?.status === 'valid'
+          ? `Certificate matches the hostname. Issuer: ${ssl.issuer || 'Unknown'
+          }. ${ssl.days_until_expiry != null
+            ? `${ssl.days_until_expiry} days until expiry.`
+            : ''
+          }`
+          : ssl?.status ===
+            'hostname_mismatch'
+            ? 'The TLS certificate does not match the requested hostname.'
+            : ssl?.status ===
+              'invalid'
+              ? 'The TLS certificate failed validity checks.'
+              : domainInfo.scheme ===
+                'https'
+                ? `TLS status: ${ssl?.status ||
+                'unknown'
+                }.`
+                : 'The submitted URL does not use HTTPS.',
+    };
+
+    /*
+     * BRAND IMPERSONATION
+     *
+     * IMPORTANT:
+     * We only show a brand when the backend
+     * actually detects one.
+     */
+
+    const detectedBrand =
+      domainInfo
+        .brand_impersonation;
+
+    const targetBrand =
+      detectedBrand?.detected
+        ? detectedBrand.brand ||
+        ''
+        : '';
+
+    const similarity =
+      detectedBrand?.detected
+        ? `${detectedBrand.confidence ?? 0}% confidence`
+        : 'No brand impersonation detected';
+
+    /*
+     * CONFIDENCE
+     */
+
+    const phishingProbability =
+      Number(
+        data.phishing_probability ?? 0
       );
 
-    if (!target) {
+    const confidence =
+      `${Math.max(
+        phishingProbability,
+        100 - phishingProbability
+      ).toFixed(2)}%`;
 
+    return {
+      url: data.url,
+
+      score:
+        Number(
+          risk.toFixed(2)
+        ),
+
+      verdict,
+
+      verdictLabel,
+
+      confidence,
+
+      threatBannerTitle:
+        verdict === 'malicious'
+          ? 'Potential Phishing Website Detected'
+          : verdict === 'suspicious'
+            ? 'Suspicious Website Detected'
+            : 'Website Appears Legitimate',
+
+      threatBannerDesc:
+        verdict === 'malicious'
+          ? 'The backend detection pipeline identified multiple indicators associated with phishing activity.'
+          : verdict === 'suspicious'
+            ? 'The backend detection pipeline identified some suspicious indicators that require caution.'
+            : 'The backend detection pipeline did not identify major suspicious indicators in this URL.',
+
+      host:
+        domainInfo.hostname ||
+        new URL(data.url).hostname,
+
+      domainAge:
+        'Not available',
+
+      domainAgeLabel:
+        'Not checked',
+
+      heuristicsPercent:
+        `${Math.round(risk)}%`,
+
+      heuristicsLabel:
+        'Backend risk score',
+
+      cloneMatchPercent:
+        detectedBrand?.detected
+          ? `${detectedBrand.confidence ?? 0}%`
+          : 'Not available',
+
+      cloneMatchLabel:
+        detectedBrand?.detected
+          ? 'Brand Match Confidence'
+          : 'No Brand Match',
+
+      findings,
+
+      features,
+
+      tlsState,
+
+      targetBrand,
+
+      similarity,
+
+      backend: data,
+    };
+  };
+
+  /*
+   * REAL BACKEND SCAN
+   */
+
+  const handleScan = async () => {
+    const target =
+      normalizeUrl(urlInput);
+
+    if (!target) {
       onShowToast(
         'Please enter a URL to scan.',
         true
       );
-
       return;
-
     }
 
     try {
-
       new URL(target);
-
     } catch {
-
       onShowToast(
         'Please enter a valid URL.',
         true
       );
-
       return;
-
     }
 
     setUrlInput(target);
-
     setIsAnalyzing(true);
-
     setAnalysis(null);
-
     setQuarantined(false);
 
-    setTimeout(() => {
+    try {
+      const response =
+        await fetch(
+          API_URL,
+          {
+            method: 'POST',
 
-      try {
+            headers: {
+              'Content-Type':
+                'application/json',
+              ...getAuthHeaders(),
+            },
 
-        const result =
-          analyzeUrl(target);
-
-        setAnalysis(result);
-
-        saveScanToHistory(
-          result
+            body:
+              JSON.stringify({
+                url: target,
+              }),
+          }
         );
 
-        onShowToast(
-          `Scan completed: ${result.score}/100 (${result.verdictLabel})`,
-          result.verdict ===
-          'malicious'
+      if (!response.ok) {
+        let message =
+          'Backend scan failed.';
+
+        try {
+          const errorData =
+            await response.json();
+
+          if (
+            errorData?.message
+          ) {
+            message =
+              errorData.message;
+          }
+        } catch {
+          // Ignore JSON parsing errors.
+        }
+
+        throw new Error(
+          message
         );
-
-      } catch {
-
-        onShowToast(
-          'Unable to analyze this URL.',
-          true
-        );
-
-      } finally {
-
-        setIsAnalyzing(false);
-
       }
 
-    }, 900);
+      const data:
+        BackendScanResponse =
+        await response.json();
 
+      if (
+        data.status !==
+        'success'
+      ) {
+        throw new Error(
+          data.message ||
+          'Unable to analyze this URL.'
+        );
+      }
+
+      const result =
+        convertBackendResult(
+          data
+        );
+
+      setAnalysis(
+        result
+      );
+
+      onShowToast(
+        `Scan completed: ${result.score}/100 (${result.verdictLabel})`,
+        result.verdict ===
+        'malicious'
+      );
+
+    } catch (error) {
+      console.error(
+        'Backend scan error:',
+        error
+      );
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to connect to PhishGuard backend.';
+
+      onShowToast(
+        message.includes(
+          'Failed to fetch'
+        )
+          ? 'Unable to connect to PhishGuard backend. Make sure Flask is running on port 5000.'
+          : message,
+        true
+      );
+
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
+
+  /*
+   * PASTE
+   */
 
   const handlePaste =
     async () => {
-
       try {
-
         const text =
           await navigator.clipboard.readText();
 
         if (text) {
-
           setUrlInput(
             text.trim()
           );
@@ -257,32 +1017,33 @@ export default function NeuralUrlScanner({
           onShowToast(
             'URL pasted successfully.'
           );
-
         }
-
       } catch {
-
         onShowToast(
           'Clipboard access failed. Please paste manually.',
           true
         );
-
       }
-
     };
 
+  /*
+   * CLEAR
+   */
+
   const handleClear = () => {
-
     setUrlInput('');
-
     setAnalysis(null);
-
     setQuarantined(false);
-
   };
 
-  const handleQuarantine = () => {
+  /*
+   * QUARANTINE
+   *
+   * Local UI state only.
+   * Does NOT claim real network quarantine.
+   */
 
+  const handleQuarantine = () => {
     if (!analysis) {
       return;
     }
@@ -295,40 +1056,31 @@ export default function NeuralUrlScanner({
     );
 
     if (nextState) {
-
       onShowToast(
         `${analysis.host} added to local quarantine list.`,
         true
       );
-
     } else {
-
       onShowToast(
-        `${analysis.host} removed from quarantine list.`
+        `${analysis.host} removed from local quarantine list.`
       );
-
     }
-
   };
 
-
-  /* PDF REPORT DOWNLOAD */
+  /*
+   * PDF REPORT
+   */
 
   const handleExportReport = () => {
-
     if (!analysis) {
-
       onShowToast(
         'Scan a URL before exporting a report.',
         true
       );
-
       return;
-
     }
 
     try {
-
       const pdf =
         new jsPDF();
 
@@ -340,30 +1092,24 @@ export default function NeuralUrlScanner({
 
       let y = 20;
 
-
       const checkPageSpace =
-        (space: number = 15) => {
-
+        (
+          space: number = 15
+        ) => {
           if (
             y >
             pageHeight - space
           ) {
-
             pdf.addPage();
-
             y = 20;
-
           }
-
         };
-
 
       const addText = (
         text: string,
         size: number = 10,
         bold: boolean = false
       ) => {
-
         pdf.setFontSize(size);
 
         pdf.setFont(
@@ -380,8 +1126,9 @@ export default function NeuralUrlScanner({
           );
 
         lines.forEach(
-          (line: string) => {
-
+          (
+            line: string
+          ) => {
             checkPageSpace(
               size + 8
             );
@@ -394,14 +1141,13 @@ export default function NeuralUrlScanner({
 
             y +=
               size + 3;
-
           }
         );
-
       };
 
-
-      /* HEADER */
+      /*
+       * HEADER
+       */
 
       pdf.setFillColor(
         20,
@@ -423,7 +1169,9 @@ export default function NeuralUrlScanner({
         200
       );
 
-      pdf.setFontSize(20);
+      pdf.setFontSize(
+        20
+      );
 
       pdf.setFont(
         'helvetica',
@@ -436,7 +1184,9 @@ export default function NeuralUrlScanner({
         17
       );
 
-      pdf.setFontSize(10);
+      pdf.setFontSize(
+        10
+      );
 
       pdf.setTextColor(
         255,
@@ -456,11 +1206,7 @@ export default function NeuralUrlScanner({
         32
       );
 
-
       y = 52;
-
-
-      /* TEXT COLOR */
 
       pdf.setTextColor(
         30,
@@ -468,8 +1214,9 @@ export default function NeuralUrlScanner({
         30
       );
 
-
-      /* SCAN INFORMATION */
+      /*
+       * SCAN INFORMATION
+       */
 
       addText(
         'SCAN INFORMATION',
@@ -491,11 +1238,11 @@ export default function NeuralUrlScanner({
         `Domain: ${analysis.host}`
       );
 
-
       y += 6;
 
-
-      /* SECURITY VERDICT */
+      /*
+       * VERDICT
+       */
 
       addText(
         'SECURITY VERDICT',
@@ -518,7 +1265,10 @@ export default function NeuralUrlScanner({
       );
 
       addText(
-        `Confidence: ${analysis.confidence}`
+        `ML Phishing Probability: ${analysis.backend
+          ?.phishing_probability ??
+        'N/A'
+        }%`
       );
 
       addText(
@@ -529,11 +1279,11 @@ export default function NeuralUrlScanner({
         analysis.threatBannerDesc
       );
 
-
       y += 6;
 
-
-      /* DETECTION REASONS */
+      /*
+       * DETECTION REASONS
+       */
 
       addText(
         'DETECTION REASONS',
@@ -544,21 +1294,28 @@ export default function NeuralUrlScanner({
       y += 3;
 
       if (
-        analysis.findings.length === 0
+        analysis.backend?.reasons &&
+        analysis.backend.reasons.length >
+        0
       ) {
+        analysis.backend.reasons.forEach(
+          (
+            reason: string,
+            index: number
+          ) => {
+            addText(
+              `${index + 1}. ${reason}`
+            );
 
-        addText(
-          'No major suspicious indicators were detected.'
+            y += 1;
+          }
         );
-
       } else {
-
         analysis.findings.forEach(
           (
             finding,
             index
           ) => {
-
             addText(
               `${index + 1}. ${finding.title} (${finding.severity})`,
               11,
@@ -568,19 +1325,15 @@ export default function NeuralUrlScanner({
             addText(
               finding.description
             );
-
-            y += 2;
-
           }
         );
-
       }
-
 
       y += 6;
 
-
-      /* URL FEATURE ANALYSIS */
+      /*
+       * URL FEATURES
+       */
 
       addText(
         'URL FEATURE ANALYSIS',
@@ -595,7 +1348,6 @@ export default function NeuralUrlScanner({
           feature,
           index
         ) => {
-
           addText(
             `${index + 1}. ${feature.label}: ${feature.value}`,
             11,
@@ -611,18 +1363,17 @@ export default function NeuralUrlScanner({
           );
 
           y += 2;
-
         }
       );
 
-
       y += 6;
 
-
-      /* SSL SECURITY */
+      /*
+       * SSL
+       */
 
       addText(
-        'SSL SECURITY CHECK',
+        'SSL / TLS SECURITY CHECK',
         15,
         true
       );
@@ -643,11 +1394,97 @@ export default function NeuralUrlScanner({
         analysis.tlsState.description
       );
 
+      if (
+        analysis.backend.ssl_analysis
+      ) {
+        addText(
+          `Certificate Subject: ${analysis.backend
+            .ssl_analysis.subject ||
+          'N/A'
+          }`
+        );
+
+        addText(
+          `Certificate Issuer: ${analysis.backend
+            .ssl_analysis.issuer ||
+          'N/A'
+          }`
+        );
+
+        addText(
+          `Hostname Match: ${analysis.backend
+            .ssl_analysis.hostname_match
+            ? 'Yes'
+            : 'No'
+          }`
+        );
+
+        if (
+          analysis.backend
+            .ssl_analysis
+            .days_until_expiry !=
+          null
+        ) {
+          addText(
+            `Days Until Expiry: ${analysis.backend
+              .ssl_analysis
+              .days_until_expiry
+            }`
+          );
+        }
+      }
 
       y += 6;
 
+      /*
+       * DOMAIN INTELLIGENCE
+       */
 
-      /* BRAND IMPERSONATION */
+      addText(
+        'DOMAIN INTELLIGENCE',
+        15,
+        true
+      );
+
+      y += 3;
+
+      addText(
+        `Registrable Domain: ${analysis.backend
+          ?.domain_info
+          ?.registrable_domain ||
+        'N/A'
+        }`
+      );
+
+      addText(
+        `Hostname: ${analysis.backend
+          ?.domain_info
+          ?.hostname ||
+        'N/A'
+        }`
+      );
+
+      addText(
+        `DNS Resolved: ${analysis.backend
+          ?.domain_info
+          ?.dns_resolved
+          ? 'Yes'
+          : 'No'
+        }`
+      );
+
+      addText(
+        `Domain Reputation: ${analysis.backend
+          ?.domain_reputation ||
+        'Unknown'
+        }`
+      );
+
+      y += 6;
+
+      /*
+       * BRAND
+       */
 
       addText(
         'BRAND IMPERSONATION ANALYSIS',
@@ -659,27 +1496,38 @@ export default function NeuralUrlScanner({
 
       addText(
         `Detected Brand: ${analysis.targetBrand ||
-        'No brand detected'
+        'No brand impersonation detected'
         }`
       );
 
       addText(
-        `Similarity Score: ${analysis.similarity ||
-        '0%'
+        `Assessment: ${analysis.similarity
         }`
       );
 
+      if (
+        analysis.backend
+          ?.domain_info
+          ?.brand_impersonation
+          ?.reason
+      ) {
+        addText(
+          analysis.backend
+            .domain_info
+            .brand_impersonation
+            .reason
+        );
+      }
 
       y += 10;
-
-
-      /* FOOTER */
 
       checkPageSpace(
         25
       );
 
-      pdf.setFontSize(9);
+      pdf.setFontSize(
+        9
+      );
 
       pdf.setTextColor(
         100,
@@ -693,20 +1541,15 @@ export default function NeuralUrlScanner({
         y
       );
 
-
-      /* SAVE PDF */
-
       pdf.save(
         `phishguard-security-report-${Date.now()}.pdf`
       );
-
 
       onShowToast(
         'PDF security report downloaded successfully.'
       );
 
     } catch (error) {
-
       console.error(
         'PDF generation error:',
         error
@@ -716,14 +1559,14 @@ export default function NeuralUrlScanner({
         'Unable to generate PDF report.',
         true
       );
-
     }
-
   };
 
+  /*
+   * VERDICT COLORS
+   */
 
   const getVerdictColor = () => {
-
     if (!analysis) {
       return 'text-[#958ea0]';
     }
@@ -743,11 +1586,9 @@ export default function NeuralUrlScanner({
     }
 
     return 'text-[#4fdbc8]';
-
   };
 
   const getVerdictBackground = () => {
-
     if (!analysis) {
       return 'bg-[#191f2f] border-[#232a3a]';
     }
@@ -767,7 +1608,6 @@ export default function NeuralUrlScanner({
     }
 
     return 'bg-teal-950/30 border-teal-500/40';
-
   };
 
   const circumference =
@@ -776,12 +1616,18 @@ export default function NeuralUrlScanner({
   const strokeOffset =
     analysis
       ? circumference -
-      (analysis.score / 100) *
+      (Math.min(
+        Math.max(
+          analysis.score,
+          0
+        ),
+        100
+      ) /
+        100) *
       circumference
       : circumference;
 
   return (
-
     <div className="flex flex-col w-full max-w-5xl mx-auto px-4 py-4 gap-6 text-[#dce2f7]">
 
       {/* HEADER */}
@@ -820,7 +1666,6 @@ export default function NeuralUrlScanner({
 
         </div>
 
-
         {/* URL INPUT */}
 
         <div className="relative flex items-center bg-[#070e1d] rounded-xl shadow-lg p-2 border border-[#232a3a] focus-within:border-[#a078ff] transition-all">
@@ -838,23 +1683,18 @@ export default function NeuralUrlScanner({
               )
             }
             onKeyDown={(event) => {
-
               if (
                 event.key ===
                 'Enter'
               ) {
-
                 handleScan();
-
               }
-
             }}
             placeholder="Paste a suspicious URL here..."
             className="w-full bg-transparent px-3 py-2 text-sm text-white focus:outline-none placeholder:text-[#958ea0]"
           />
 
           {urlInput && (
-
             <button
               type="button"
               onClick={
@@ -862,17 +1702,13 @@ export default function NeuralUrlScanner({
               }
               className="w-8 h-8 flex items-center justify-center text-[#958ea0] hover:text-white transition-colors"
             >
-
               <span className="material-symbols-outlined">
                 close
               </span>
-
             </button>
-
           )}
 
         </div>
-
 
         {/* BUTTONS */}
 
@@ -894,7 +1730,6 @@ export default function NeuralUrlScanner({
 
           </button>
 
-
           <button
             type="button"
             onClick={
@@ -912,11 +1747,9 @@ export default function NeuralUrlScanner({
                   : ''
                 }`}
             >
-
               {isAnalyzing
                 ? 'refresh'
                 : 'radar'}
-
             </span>
 
             {isAnalyzing
@@ -927,8 +1760,7 @@ export default function NeuralUrlScanner({
 
         </div>
 
-
-        {/* SECURITY TIPS QUICK ACCESS */}
+        {/* SECURITY TIPS */}
 
         <section className="rounded-2xl border border-purple-500/20 bg-gradient-to-r from-purple-950/30 via-[#141b2b] to-[#141b2b] p-4">
 
@@ -958,26 +1790,19 @@ export default function NeuralUrlScanner({
 
             </div>
 
-
             <button
               type="button"
               onClick={() => {
-
                 if (
                   onNavigateToTips
                 ) {
-
                   onNavigateToTips();
-
                 } else {
-
                   onShowToast(
                     'Security Tips navigation is not configured.',
                     true
                   );
-
                 }
-
               }}
               className="shrink-0 h-10 px-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center justify-center gap-2 transition-all active:scale-95"
             >
@@ -995,7 +1820,6 @@ export default function NeuralUrlScanner({
         </section>
 
       </section>
-
 
       {/* EMPTY STATE */}
 
@@ -1031,14 +1855,12 @@ export default function NeuralUrlScanner({
                 'Brand Detection',
               ].map(
                 (item) => (
-
                   <div
                     key={item}
                     className="bg-[#191f2f] border border-[#232a3a] rounded-xl p-3 text-xs text-[#cbc3d7]"
                   >
                     {item}
                   </div>
-
                 )
               )}
 
@@ -1047,7 +1869,6 @@ export default function NeuralUrlScanner({
           </section>
 
         )}
-
 
       {/* LOADING */}
 
@@ -1062,13 +1883,12 @@ export default function NeuralUrlScanner({
           </h2>
 
           <p className="text-sm text-[#958ea0] mt-3">
-            Checking URL features and phishing indicators...
+            Connecting to PhishGuard AI detection engine...
           </p>
 
         </section>
 
       )}
-
 
       {/* RESULTS */}
 
@@ -1108,9 +1928,7 @@ export default function NeuralUrlScanner({
                   <span
                     className={`text-[10px] font-bold uppercase tracking-wider ${getVerdictColor()}`}
                   >
-
                     {analysis.verdictLabel}
-
                   </span>
 
                   <h2 className="text-lg font-bold text-white mt-1">
@@ -1127,7 +1945,6 @@ export default function NeuralUrlScanner({
 
             </section>
 
-
             {/* RISK SCORE */}
 
             <section className="bg-[#191f2f] rounded-2xl p-5 border border-[#232a3a]">
@@ -1141,7 +1958,7 @@ export default function NeuralUrlScanner({
                   </h2>
 
                   <p className="text-xs text-[#958ea0] mt-1">
-                    AI-based threat assessment
+                    Multi-layer threat assessment
                   </p>
 
                 </div>
@@ -1149,13 +1966,10 @@ export default function NeuralUrlScanner({
                 <span
                   className={`text-xs font-bold uppercase ${getVerdictColor()}`}
                 >
-
                   {analysis.verdictLabel}
-
                 </span>
 
               </div>
-
 
               <div className="flex flex-col items-center">
 
@@ -1196,7 +2010,6 @@ export default function NeuralUrlScanner({
 
                   </svg>
 
-
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
 
                     <span
@@ -1213,63 +2026,70 @@ export default function NeuralUrlScanner({
 
                 </div>
 
-
                 <p className="text-sm text-[#cbc3d7] mt-3">
-                  Confidence:{' '}
-                  {analysis.confidence}
+                  ML phishing probability:{' '}
+                  {analysis.backend
+                    ?.phishing_probability ??
+                    'N/A'}%
                 </p>
 
               </div>
-
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-6">
 
                 <div className="bg-[#141b2b] border border-[#232a3a] rounded-xl p-3 text-center">
 
                   <p className="text-[10px] uppercase text-[#958ea0]">
-                    Domain Age
+                    Domain
                   </p>
 
-                  <p className="text-sm font-bold text-white mt-1">
-                    {analysis.domainAge}
+                  <p className="text-sm font-bold text-white mt-1 break-all">
+                    {analysis.backend
+                      ?.domain_info
+                      ?.registrable_domain ||
+                      'Unknown'}
                   </p>
 
                   <p className="text-[10px] text-[#4fdbc8]">
-                    {analysis.domainAgeLabel}
+                    {analysis.backend
+                      ?.domain_reputation ||
+                      'unknown'}
                   </p>
 
                 </div>
 
-
                 <div className="bg-[#141b2b] border border-[#232a3a] rounded-xl p-3 text-center">
 
                   <p className="text-[10px] uppercase text-[#958ea0]">
-                    Heuristics
+                    Backend Risk
                   </p>
 
                   <p className="text-sm font-bold text-white mt-1">
-                    {analysis.heuristicsPercent}
+                    {analysis.score}/100
                   </p>
 
                   <p className="text-[10px] text-[#4fdbc8]">
-                    {analysis.heuristicsLabel}
+                    Multi-layer score
                   </p>
 
                 </div>
 
-
                 <div className="bg-[#141b2b] border border-[#232a3a] rounded-xl p-3 text-center">
 
                   <p className="text-[10px] uppercase text-[#958ea0]">
-                    Clone Match
+                    DNS
                   </p>
 
                   <p className="text-sm font-bold text-white mt-1">
-                    {analysis.cloneMatchPercent}
+                    {analysis.backend
+                      ?.domain_info
+                      ?.dns_resolved
+                      ? 'Resolved'
+                      : 'Not Resolved'}
                   </p>
 
                   <p className="text-[10px] text-[#4fdbc8]">
-                    {analysis.cloneMatchLabel}
+                    Domain intelligence
                   </p>
 
                 </div>
@@ -1278,59 +2098,241 @@ export default function NeuralUrlScanner({
 
             </section>
 
+           {/* DETECTION REASONS */}
 
-            {/* DETECTION REASONS */}
+<section>
 
-            <section>
+  <div className="flex items-center justify-between mb-4">
 
-              <div className="flex items-center justify-between mb-4">
+    <div>
 
-                <div>
+      <h2 className="text-base font-bold text-white">
+        Security Analysis
+      </h2>
 
-                  <h2 className="text-base font-bold text-white">
-                    Detection Reasons
-                  </h2>
+      <p className="text-xs text-[#958ea0]">
+        Evidence and threat indicators identified during analysis
+      </p>
 
-                  <p className="text-xs text-[#958ea0]">
-                    Security findings detected during analysis
-                  </p>
+    </div>
 
-                </div>
+    <span className="text-xs text-[#958ea0]">
+      {analysis.backend?.reasons?.length ??
+        analysis.findings.length}{' '}
+      signals
+    </span>
 
-                <span className="text-xs text-[#958ea0]">
-                  {analysis.findings.length}
-                  {' '}
-                  findings
+  </div>
+
+
+  {/* SECURITY EVIDENCE */}
+
+  {(() => {
+
+    const allReasons: string[] =
+      analysis.backend?.reasons?.length
+        ? analysis.backend.reasons
+        : analysis.findings.map(
+            (finding) =>
+              `${finding.title}: ${finding.description}`
+          );
+
+    const positiveKeywords = [
+      'low phishing probability',
+      'trusted domain',
+      'https is enabled',
+      'tld is commonly used',
+      'no phishing-related keywords',
+      'tls certificate is valid',
+      'certificate is valid',
+      'matches the hostname',
+    ];
+
+    const securityEvidence =
+      allReasons.filter((reason) =>
+        positiveKeywords.some(
+          (keyword) =>
+            reason.toLowerCase().includes(
+              keyword
+            )
+        )
+      );
+
+    const threatIndicators =
+      allReasons.filter(
+        (reason) =>
+          !positiveKeywords.some(
+            (keyword) =>
+              reason.toLowerCase().includes(
+                keyword
+              )
+          )
+      );
+
+
+    return (
+      <div className="space-y-6">
+
+
+        {/* POSITIVE SECURITY EVIDENCE */}
+
+        {securityEvidence.length > 0 && (
+
+          <div>
+
+            <div className="flex items-center gap-2 mb-3">
+
+              <div className="w-7 h-7 rounded-lg bg-teal-500/10 border border-teal-500/20 flex items-center justify-center">
+
+                <span className="material-symbols-outlined text-[17px] text-[#4fdbc8]">
+                  verified
                 </span>
 
               </div>
 
+              <div>
 
-              <div className="space-y-3">
+                <h3 className="text-sm font-bold text-white">
+                  Security Evidence
+                </h3>
 
-                {analysis.findings.map(
-                  (finding) => (
+                <p className="text-[10px] text-[#958ea0]">
+                  Positive indicators identified by the analysis engine
+                </p>
+
+              </div>
+
+            </div>
+
+
+            <div className="space-y-3">
+
+              {securityEvidence.map(
+                (
+                  reason,
+                  index
+                ) => (
+
+                  <div
+                    key={`evidence-${index}`}
+                    className="flex gap-4 p-4 rounded-xl bg-teal-950/20 border border-teal-500/20"
+                  >
+
+                    <div className="w-10 h-10 shrink-0 rounded-xl flex items-center justify-center bg-teal-500/15 text-[#4fdbc8]">
+
+                      <span className="material-symbols-outlined">
+                        check_circle
+                      </span>
+
+                    </div>
+
+
+                    <div className="flex-1">
+
+                      <h4 className="text-sm font-semibold text-white">
+                        Verified Security Signal
+                      </h4>
+
+                      <p className="text-xs text-[#cbc3d7] mt-2">
+                        {reason}
+                      </p>
+
+                    </div>
+
+                  </div>
+
+                )
+              )}
+
+            </div>
+
+          </div>
+
+        )}
+
+
+        {/* THREAT INDICATORS */}
+
+        {threatIndicators.length > 0 && (
+
+          <div>
+
+            <div className="flex items-center gap-2 mb-3">
+
+              <div className="w-7 h-7 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center">
+
+                <span className="material-symbols-outlined text-[17px] text-red-400">
+                  shield
+                </span>
+
+              </div>
+
+              <div>
+
+                <h3 className="text-sm font-bold text-white">
+                  Threat Indicators
+                </h3>
+
+                <p className="text-[10px] text-[#958ea0]">
+                  Suspicious characteristics identified during analysis
+                </p>
+
+              </div>
+
+            </div>
+
+
+            <div className="space-y-3">
+
+              {threatIndicators.map(
+                (
+                  reason,
+                  index
+                ) => {
+
+                  const lower =
+                    reason.toLowerCase();
+
+                  const isHighRisk =
+                    lower.includes(
+                      'phishing'
+                    ) ||
+                    lower.includes(
+                      'impersonation'
+                    ) ||
+                    lower.includes(
+                      'malicious'
+                    ) ||
+                    lower.includes(
+                      'suspicious'
+                    ) ||
+                    lower.includes(
+                      '@'
+                    );
+
+                  return (
 
                     <div
-                      key={finding.id}
-                      className="flex gap-4 p-4 rounded-xl bg-[#191f2f] border border-[#232a3a]"
+                      key={`threat-${index}`}
+                      className={`flex gap-4 p-4 rounded-xl border ${
+                        isHighRisk
+                          ? 'bg-red-950/20 border-red-500/20'
+                          : 'bg-orange-950/20 border-orange-500/20'
+                      }`}
                     >
 
                       <div
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center ${finding.severity ===
-                            'CRITICAL' ||
-                            finding.severity ===
-                            'HIGH'
+                        className={`w-10 h-10 shrink-0 rounded-xl flex items-center justify-center ${
+                          isHighRisk
                             ? 'bg-red-500/15 text-red-400'
-                            : finding.severity ===
-                              'SUSPICIOUS'
-                              ? 'bg-orange-500/15 text-orange-400'
-                              : 'bg-teal-500/15 text-teal-400'
-                          }`}
+                            : 'bg-orange-500/15 text-orange-400'
+                        }`}
                       >
 
                         <span className="material-symbols-outlined">
-                          {finding.icon}
+                          {isHighRisk
+                            ? 'gpp_maybe'
+                            : 'warning'}
                         </span>
 
                       </div>
@@ -1338,33 +2340,36 @@ export default function NeuralUrlScanner({
 
                       <div className="flex-1">
 
-                        <div className="flex items-center justify-between gap-3">
-
-                          <h3 className="text-sm font-semibold text-white">
-                            {finding.title}
-                          </h3>
-
-                          <span className="text-[10px] text-[#958ea0]">
-                            {finding.severity}
-                          </span>
-
-                        </div>
+                        <h4 className="text-sm font-semibold text-white">
+                          Threat Indicator
+                        </h4>
 
                         <p className="text-xs text-[#cbc3d7] mt-2">
-                          {finding.description}
+                          {reason}
                         </p>
 
                       </div>
 
                     </div>
 
-                  )
-                )}
+                  );
 
-              </div>
+                }
+              )}
 
-            </section>
+            </div>
 
+          </div>
+
+        )}
+
+
+      </div>
+    );
+
+  })()}
+
+</section>
 
             {/* URL FEATURE ANALYSIS */}
 
@@ -1382,14 +2387,14 @@ export default function NeuralUrlScanner({
 
               </div>
 
-
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
 
                 {analysis.features.map(
                   (feature) => (
-
                     <div
-                      key={feature.id}
+                      key={
+                        feature.id
+                      }
                       className="p-4 rounded-xl bg-[#141b2b] border border-[#232a3a]"
                     >
 
@@ -1414,14 +2419,12 @@ export default function NeuralUrlScanner({
                       </p>
 
                     </div>
-
                   )
                 )}
 
               </div>
 
             </section>
-
 
             {/* SSL SECURITY */}
 
@@ -1434,11 +2437,10 @@ export default function NeuralUrlScanner({
                 </h2>
 
                 <p className="text-xs text-[#958ea0] mt-1">
-                  TLS certificate and connection inspection
+                  Real TLS certificate inspection from the backend
                 </p>
 
               </div>
-
 
               <div className="p-4 rounded-xl bg-[#141b2b] border border-[#232a3a]">
 
@@ -1472,6 +2474,76 @@ export default function NeuralUrlScanner({
 
               </div>
 
+              {/* REAL CERTIFICATE DETAILS */}
+
+              {analysis.backend
+                ?.ssl_analysis && (
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                    <div className="p-3 rounded-xl bg-[#141b2b] border border-[#232a3a]">
+
+                      <p className="text-[10px] uppercase text-[#958ea0]">
+                        Certificate Subject
+                      </p>
+
+                      <p className="text-xs text-white mt-1 break-all">
+                        {analysis.backend
+                          .ssl_analysis
+                          .subject ||
+                          'N/A'}
+                      </p>
+
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#141b2b] border border-[#232a3a]">
+
+                      <p className="text-[10px] uppercase text-[#958ea0]">
+                        Certificate Issuer
+                      </p>
+
+                      <p className="text-xs text-white mt-1 break-all">
+                        {analysis.backend
+                          .ssl_analysis
+                          .issuer ||
+                          'N/A'}
+                      </p>
+
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#141b2b] border border-[#232a3a]">
+
+                      <p className="text-[10px] uppercase text-[#958ea0]">
+                        Hostname Match
+                      </p>
+
+                      <p className="text-xs font-semibold text-white mt-1">
+                        {analysis.backend
+                          .ssl_analysis
+                          .hostname_match
+                          ? 'Yes'
+                          : 'No'}
+                      </p>
+
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#141b2b] border border-[#232a3a]">
+
+                      <p className="text-[10px] uppercase text-[#958ea0]">
+                        Days Until Expiry
+                      </p>
+
+                      <p className="text-xs font-semibold text-white mt-1">
+                        {analysis.backend
+                          .ssl_analysis
+                          .days_until_expiry ??
+                          'N/A'}
+                      </p>
+
+                    </div>
+
+                  </div>
+                )}
 
               {/* BRAND DETECTION */}
 
@@ -1482,11 +2554,10 @@ export default function NeuralUrlScanner({
                 </h2>
 
                 <p className="text-xs text-[#958ea0] mt-1">
-                  Check for potential brand spoofing or typosquatting
+                  Backend brand impersonation and trusted-domain analysis
                 </p>
 
               </div>
-
 
               <div className="flex items-center justify-between gap-4 p-4 rounded-xl bg-[#141b2b] border border-[#232a3a]">
 
@@ -1494,33 +2565,33 @@ export default function NeuralUrlScanner({
 
                   <p className="text-sm font-semibold text-white">
                     {analysis.targetBrand ||
-                      'No brand detected'}
+                      'No brand impersonation detected'}
                   </p>
 
                   <p className="text-xs text-[#958ea0] mt-1">
-                    Brand similarity analysis
+                    {analysis.backend
+                      ?.domain_info
+                      ?.registrable_domain ||
+                      'Unknown domain'}
                   </p>
 
                 </div>
 
-
                 <div className="text-right">
 
                   <p
-                    className={`text-xl font-bold ${getVerdictColor()}`}
+                    className={`text-sm font-bold ${getVerdictColor()}`}
                   >
-                    {analysis.similarity ||
-                      '0%'}
+                    {analysis.similarity}
                   </p>
 
                   <p className="text-[10px] text-[#958ea0]">
-                    Similarity
+                    Brand assessment
                   </p>
 
                 </div>
 
               </div>
-
 
               {/* ACTIONS */}
 
@@ -1551,9 +2622,6 @@ export default function NeuralUrlScanner({
 
                 </button>
 
-
-                {/* PDF DOWNLOAD */}
-
                 <button
                   type="button"
                   onClick={
@@ -1575,11 +2643,8 @@ export default function NeuralUrlScanner({
             </section>
 
           </>
-
         )}
 
     </div>
-
   );
-
 }

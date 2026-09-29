@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Shield, Radar, History, Bot, Lightbulb, Settings, Sparkles, Activity, ChevronRight, X } from 'lucide-react';
 import { NavTab } from '../types';
 
@@ -24,6 +25,65 @@ export default function Sidebar({
   const isTips = currentTab === 'tips';
   const isSettings = currentTab === 'settings' || currentTab === 'config';
 
+  const [scanCount, setScanCount] = useState(0);
+  const [backendOnline, setBackendOnline] = useState(false);
+
+  useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        const token =
+  localStorage.getItem('phishguard_token') || '';
+
+const response = await fetch(
+  'http://127.0.0.1:5000/api/history',
+  {
+    headers: token
+      ? {
+          Authorization: `Bearer ${token}`,
+        }
+      : {},
+  }
+);
+        const data = await response.json();
+
+        setBackendOnline(
+          response.ok && data?.status === 'success'
+        );
+      } catch (error) {
+        console.error('Backend health check failed:', error);
+        setBackendOnline(false);
+      }
+    };
+
+    checkBackend();
+
+    const interval = window.setInterval(checkBackend, 30000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+
+  useEffect(() => {
+    const fetchScanCount = async () => {
+      try {
+        const response = await fetch('http://127.0.0.1:5000/api/history');
+
+        if (!response.ok) {
+          throw new Error(`History API returned HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.status === 'success' && Array.isArray(data.scans)) {
+          setScanCount(data.scans.length);
+        }
+      } catch (error) {
+        console.error('Failed to load scan count:', error);
+      }
+    };
+
+    fetchScanCount();
+  }, []);
+
   const navItems = [
     {
       id: 'dashboard' as NavTab,
@@ -47,7 +107,7 @@ export default function Sidebar({
       label: 'Scan History',
       icon: History,
       active: isHistory,
-      badge: '14.8k',
+      badge: String(scanCount),
       badgeClass: 'bg-zinc-800 text-zinc-400',
       description: 'Forensics & audit logs',
     },
@@ -136,15 +196,21 @@ export default function Sidebar({
             </span>
             <div className="flex flex-col">
               <span className="text-[11px] font-semibold text-zinc-200 tracking-wide uppercase">
-                {radarActive ? 'Autonomous Radar' : 'Radar Standby'}
+                {backendOnline ? 'Backend Online' : 'Backend Offline'}
               </span>
               <span className="text-[10px] text-zinc-400 font-mono">
-                {radarActive ? '6 Regions Monitoring' : 'Offline'}
+                {backendOnline
+                  ? 'API & database services reachable'
+                  : 'Start the PhishGuard backend'}
               </span>
             </div>
           </div>
-          <div className="text-[10px] font-mono font-bold text-teal-400 px-1.5 py-0.5 rounded bg-teal-500/10 border border-teal-500/20">
-            99.9%
+          <div className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+              backendOnline
+                ? 'text-teal-400 bg-teal-500/10 border-teal-500/20'
+                : 'text-zinc-400 bg-zinc-500/10 border-zinc-500/20'
+            }`}>
+            {backendOnline ? 'ONLINE' : 'OFFLINE'}
           </div>
         </div>
       </div>
@@ -224,34 +290,7 @@ export default function Sidebar({
           </p>
         </div>
 
-        {/* User / Analyst Profile */}
-        <div className="flex items-center justify-between p-2 rounded-xl bg-[#171a24] border border-[#262c3b]">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="relative w-8 h-8 rounded-full overflow-hidden ring-1 ring-purple-500/40 shrink-0">
-              <img
-                alt="Analyst Avatar"
-                className="w-full h-full object-cover"
-                src="https://lh3.googleusercontent.com/aida-public/AB6AXuBNSv6oaHv0MziUPe8MVIS_tsNFP_7UlGT9eJF5gQ3eiYqc_qx-AhCyzf1SpkhgCfvN5_nbyv_DWRvbWiDsy8IlKCfoPB-LMuYN1yT3AaHX8nuGwoySiPpJd9lFdyx-zjp1ABUCv8HhLUn36sBoXXBu6HgXY0p6luiXXXhOXGig1x-sRFbFngm1w8fvaqNDh_j3KttMqgy1eRFI6QPi3_XAZHazfHkVq8hcGA7nzOoSwXxZG0xuW62oqA"
-              />
-              <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-[#171a24]" />
-            </div>
-            <div className="flex flex-col min-w-0">
-              <span className="text-[12px] font-bold text-zinc-200 truncate">
-                SOC Lead Analyst
-              </span>
-              <span className="text-[10px] font-mono text-zinc-400 truncate">
-                Tier-3 SecOps • Admin
-              </span>
-            </div>
-          </div>
-          <button
-            onClick={() => handleSelectTab('settings')}
-            className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-            title="Configure SOC settings"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
+       
       </div>
     </div>
   );

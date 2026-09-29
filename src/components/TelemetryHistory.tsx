@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 
 interface TelemetryHistoryProps {
   onInspectUrl: (url: string) => void;
@@ -7,60 +7,120 @@ interface TelemetryHistoryProps {
 
 type ScanRecord = {
   id: string;
+  numericId: number;
   url: string;
   status: 'Phishing' | 'Suspicious' | 'Safe';
   risk: number;
   time: string;
   source: string;
-  createdAt?: string;
+  createdAt: string;
 };
 
-const STORAGE_KEY = 'phishguard_scan_history';
+interface BackendScan {
+  id: number;
+  url: string;
+  verdict: string;
+  risk_score: number;
+  phishing_probability: number | null;
+  legitimate_probability: number | null;
+  domain: string | null;
+  scanned_at: string;
+}
+
+const API_BASE = 'http://127.0.0.1:5000/api/history';
+
+const getAuthHeaders = (): Record<string, string> => {
+  const token = localStorage.getItem('phishguard_token') || '';
+
+  return token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+};
 
 export default function TelemetryHistory({
   onInspectUrl,
   onShowToast,
 }: TelemetryHistoryProps) {
   const [searchQuery, setSearchQuery] = useState('');
-
-  const [filter, setFilter] = useState<
-    'All' | 'Phishing' | 'Suspicious' | 'Safe'
-  >('All');
-
+  const [filter, setFilter] = useState<'All' | 'Phishing' | 'Suspicious' | 'Safe'>('All');
   const [records, setRecords] = useState<ScanRecord[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
-  useEffect(() => {
+  const formatTimestamp = (raw: string): string => {
+    if (!raw) return 'Unknown';
     try {
-      const savedHistory = localStorage.getItem(STORAGE_KEY);
-
-      if (!savedHistory) {
-        setRecords([]);
-        return;
-      }
-
-      const parsedHistory = JSON.parse(savedHistory);
-
-      if (Array.isArray(parsedHistory)) {
-        setRecords(parsedHistory);
+      const isoString = raw.includes('T') ? raw : raw.replace(' ', 'T') + 'Z';
+      const parsed = new Date(isoString);
+      if (!isNaN(parsed.getTime())) {
+        return parsed.toLocaleString();
       }
     } catch {
+      // fallback to raw
+    }
+    return raw;
+  };
+
+  const mapVerdictToStatus = (verdict: string): 'Phishing' | 'Suspicious' | 'Safe' => {
+    const v = (verdict || '').toLowerCase();
+    if (v === 'phishing') return 'Phishing';
+    if (v === 'suspicious') return 'Suspicious';
+    return 'Safe';
+  };
+
+  const fetchHistory = useCallback(async () => {
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch(API_BASE, {
+        headers: getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to load history (HTTP ${response.status})`);
+      }
+
+      const data = await response.json();
+
+      if (data.status === 'success' && Array.isArray(data.scans)) {
+        const mappedRecords: ScanRecord[] = data.scans.map((scan: BackendScan) => ({
+          id: `SCAN-${scan.id}`,
+          numericId: scan.id,
+          url: scan.url,
+          status: mapVerdictToStatus(scan.verdict),
+          risk: Math.round(Number(scan.risk_score || 0)),
+          time: formatTimestamp(scan.scanned_at),
+          source: scan.domain || 'PhishGuard AI',
+          createdAt: scan.scanned_at,
+        }));
+        setRecords(mappedRecords);
+      } else {
+        throw new Error(data.message || 'Invalid response from history API');
+      }
+    } catch (err: any) {
+      console.error('Error fetching scan history:', err);
+      setErrorMessage(err.message || 'Backend is unavailable');
       setRecords([]);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
 
   const filteredRecords = useMemo(() => {
     return records.filter((record) => {
       const matchesSearch =
-        record.url
-          .toLowerCase()
-          .includes(searchQuery.toLowerCase()) ||
-        record.id
-          .toLowerCase()
-          .includes(searchQuery.toLowerCase());
+        record.url.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        record.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        String(record.numericId).includes(searchQuery.trim());
 
       const matchesFilter =
-        filter === 'All' ||
-        record.status === filter;
+        filter === 'All' || record.status === filter;
 
       return matchesSearch && matchesFilter;
     });
@@ -78,19 +138,46 @@ export default function TelemetryHistory({
     (record) => record.status === 'Safe'
   ).length;
 
-  const clearHistory = () => {
-    localStorage.removeItem(STORAGE_KEY);
+  const clearHistory = async () => {
+    setIsDeleting(true);
+    try {
+      const response = await fetch(API_BASE, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
 
-    setRecords([]);
+      if (!response.ok) {
+        throw new Error('Failed to clear history on backend');
+      }
 
-    onShowToast(
-      'Scan history cleared successfully'
-    );
+      setRecords([]);
+      onShowToast('Scan history cleared successfully');
+    } catch (err: any) {
+      onShowToast(err.message || 'Failed to clear scan history', true);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
-  const getStatusStyle = (
-    status: ScanRecord['status']
-  ) => {
+  const deleteSingleRecord = async (scanId: number) => {
+    try {
+      const response = await fetch(`${API_BASE}/${scanId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to delete scan #${scanId}`);
+      }
+
+      setRecords((prev) => prev.filter((r) => r.numericId !== scanId));
+      onShowToast(`Scan #${scanId} deleted successfully`);
+    } catch (err: any) {
+      onShowToast(err.message || 'Failed to delete scan record', true);
+    }
+  };
+
+  const getStatusStyle = (status: ScanRecord['status']) => {
     if (status === 'Phishing') {
       return 'bg-red-500/10 text-red-400 border-red-500/20';
     }
@@ -134,21 +221,34 @@ export default function TelemetryHistory({
           </div>
 
           <p className="mt-1 text-sm text-[#8f96a8]">
-            Forensic audit logs and previously analyzed threat records
+            Forensic audit logs and previously analyzed threat records from SQLite database
           </p>
         </div>
 
-        <button
-          onClick={clearHistory}
-          disabled={records.length === 0}
-          className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-red-300 transition-colors border rounded-lg bg-red-500/10 border-red-500/20 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <span className="material-symbols-outlined text-[18px]">
-            delete
-          </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={fetchHistory}
+            disabled={isLoading}
+            className="flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-semibold text-purple-300 transition-colors border rounded-lg bg-purple-500/10 border-purple-500/20 hover:bg-purple-500/20 disabled:opacity-40"
+            title="Reload from backend"
+          >
+            <span className={`material-symbols-outlined text-[18px] ${isLoading ? 'animate-spin' : ''}`}>
+              refresh
+            </span>
+            Refresh
+          </button>
 
-          Clear History
-        </button>
+          <button
+            onClick={clearHistory}
+            disabled={records.length === 0 || isDeleting}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-red-300 transition-colors border rounded-lg bg-red-500/10 border-red-500/20 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <span className="material-symbols-outlined text-[18px]">
+              delete
+            </span>
+            Clear History
+          </button>
+        </div>
 
       </div>
 
@@ -305,7 +405,7 @@ export default function TelemetryHistory({
 
       </div>
 
-      {/* History Table */}
+      {/* History Table Container */}
       <div className="overflow-hidden border rounded-xl bg-[#141b2b] border-[#232a3a]">
 
         <div className="flex items-center justify-between p-4 border-b border-[#232a3a]">
@@ -326,14 +426,63 @@ export default function TelemetryHistory({
 
             <span className="w-2 h-2 bg-teal-400 rounded-full animate-pulse" />
 
-            LIVE AUDIT LOG
+            DATABASE AUDIT LOG
 
           </span>
 
         </div>
 
-        {filteredRecords.length === 0 ? (
+        {/* State: Loading */}
+        {isLoading ? (
 
+          <div className="flex flex-col items-center justify-center py-20 text-[#8f96a8]">
+
+            <span className="mb-3 material-symbols-outlined text-[42px] animate-spin text-purple-400">
+              progress_activity
+            </span>
+
+            <h3 className="text-base font-semibold text-[#dce2f7]">
+              Loading scan history...
+            </h3>
+
+            <p className="mt-1 text-sm text-[#7d8597]">
+              Fetching real scan records from backend database
+            </p>
+
+          </div>
+
+        ) : errorMessage ? (
+
+          /* State: Error */
+          <div className="flex flex-col items-center justify-center py-20 text-red-400">
+
+            <span className="mb-3 material-symbols-outlined text-[42px]">
+              cloud_off
+            </span>
+
+            <h3 className="text-base font-semibold">
+              Backend is unavailable
+            </h3>
+
+            <p className="mt-1 text-sm text-[#8f96a8]">
+              {errorMessage}
+            </p>
+
+            <button
+              onClick={fetchHistory}
+              className="inline-flex items-center gap-2 px-4 py-2 mt-4 text-xs font-semibold text-purple-300 transition-colors border rounded-lg bg-purple-500/10 border-purple-500/20 hover:bg-purple-500/20"
+            >
+              <span className="material-symbols-outlined text-[16px]">
+                refresh
+              </span>
+              Retry
+            </button>
+
+          </div>
+
+        ) : records.length === 0 ? (
+
+          /* State: Empty records */
           <div className="flex flex-col items-center justify-center py-20">
 
             <span className="mb-3 material-symbols-outlined text-[42px] text-[#495064]">
@@ -341,7 +490,7 @@ export default function TelemetryHistory({
             </span>
 
             <h3 className="text-base font-semibold">
-              No scan history found
+              No scans found.
             </h3>
 
             <p className="mt-1 text-sm text-[#7d8597]">
@@ -350,8 +499,28 @@ export default function TelemetryHistory({
 
           </div>
 
+        ) : filteredRecords.length === 0 ? (
+
+          /* State: No matching filter */
+          <div className="flex flex-col items-center justify-center py-20">
+
+            <span className="mb-3 material-symbols-outlined text-[42px] text-[#495064]">
+              search_off
+            </span>
+
+            <h3 className="text-base font-semibold">
+              No matching scans found.
+            </h3>
+
+            <p className="mt-1 text-sm text-[#7d8597]">
+              Try adjusting your search query or filter.
+            </p>
+
+          </div>
+
         ) : (
 
+          /* State: Table with records */
           <div className="overflow-x-auto">
 
             <table className="w-full min-w-[760px]">
@@ -393,7 +562,7 @@ export default function TelemetryHistory({
                 {filteredRecords.map((record) => (
 
                   <tr
-                    key={record.id}
+                    key={record.numericId}
                     className="border-b border-[#232a3a] last:border-b-0 hover:bg-[#191f2f]/50 transition-colors"
                   >
 
@@ -407,7 +576,7 @@ export default function TelemetryHistory({
 
                     <td className="px-5 py-4">
 
-                      <div className="max-w-[280px] truncate text-sm text-[#dce2f7]">
+                      <div className="max-w-[280px] truncate text-sm text-[#dce2f7]" title={record.url}>
                         {record.url}
                       </div>
 
@@ -460,24 +629,40 @@ export default function TelemetryHistory({
 
                     <td className="px-5 py-4 text-right">
 
-                      <button
-                        onClick={() => {
-                          onInspectUrl(record.url);
+                      <div className="inline-flex items-center justify-end gap-2">
 
-                          onShowToast(
-                            `Opening ${record.id} for detailed inspection`
-                          );
-                        }}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-purple-300 transition-colors border rounded-lg bg-purple-500/10 border-purple-500/20 hover:bg-purple-500/20"
-                      >
+                        <button
+                          onClick={() => {
+                            onInspectUrl(record.url);
 
-                        <span className="material-symbols-outlined text-[16px]">
-                          visibility
-                        </span>
+                            onShowToast(
+                              `Opening ${record.id} for detailed inspection`
+                            );
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-purple-300 transition-colors border rounded-lg bg-purple-500/10 border-purple-500/20 hover:bg-purple-500/20"
+                        >
 
-                        Inspect
+                          <span className="material-symbols-outlined text-[16px]">
+                            visibility
+                          </span>
 
-                      </button>
+                          Inspect
+
+                        </button>
+
+                        <button
+                          onClick={() => deleteSingleRecord(record.numericId)}
+                          title={`Delete ${record.id}`}
+                          className="inline-flex items-center justify-center p-2 text-xs font-semibold text-red-300 transition-colors border rounded-lg bg-red-500/10 border-red-500/20 hover:bg-red-500/20"
+                        >
+
+                          <span className="material-symbols-outlined text-[16px]">
+                            delete
+                          </span>
+
+                        </button>
+
+                      </div>
 
                     </td>
 

@@ -1,119 +1,166 @@
-import {
-  useEffect,
-  useState,
-} from 'react';
-
-import {
-  PlaybookModule,
-} from '../types';
-
-import {
-  PLAYBOOK_MODULES,
-} from '../data/mockData';
-
-import {
-  ShieldCheck,
-  AlertTriangle,
-  Flame,
-  Bot,
-  Sparkles,
-  ArrowRight,
-  Activity,
-  CheckCircle2,
-  ChevronRight,
-  Lightbulb,
-  Radar,
-  Search,
-  ShieldAlert,
-  TrendingUp,
-} from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import type { PlaybookModule } from '../types';
+import { PLAYBOOK_MODULES } from '../data/mockData';
 
 interface SocCommandCenterProps {
   onScanUrl: (url: string) => void;
-  onOpenPlaybook: (
-    playbook: PlaybookModule
-  ) => void;
-  onNavigateToTips?: () => void;
-  onNavigateToChatbot?: () => void;
+  onOpenPlaybook: (module: PlaybookModule) => void;
 }
 
-type ScanHistoryRecord = {
+interface BackendScan {
+  id: number;
+  url: string;
+  verdict: string;
+  risk_score: number;
+  domain: string | null;
+  scanned_at: string;
+}
+
+interface ScanHistoryRecord {
   id: string;
   url: string;
-  status:
-    | 'Phishing'
-    | 'Suspicious'
-    | 'Safe';
+  status: 'Safe' | 'Suspicious' | 'Phishing';
   risk: number;
   time: string;
   source: string;
   createdAt: string;
-};
+}
 
-const STORAGE_KEY =
-  'phishguard_scan_history';
+const API_BASE = 'http://127.0.0.1:5000/api';
 
-export default function SocCommandCenter({
+const SocCommandCenter: React.FC<SocCommandCenterProps> = ({
   onScanUrl,
   onOpenPlaybook,
-  onNavigateToTips,
-  onNavigateToChatbot,
-}: SocCommandCenterProps) {
-  const [
-    quickScanOpen,
-    setQuickScanOpen,
-  ] = useState(false);
+}) => {
+  const [quickInputUrl, setQuickInputUrl] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState('');
 
-  const [
-    quickInputUrl,
-    setQuickInputUrl,
-  ] = useState('');
-
-  const [
-    isScanning,
-    setIsScanning,
-  ] = useState(false);
-
-  const [
-    scanFeedback,
-    setScanFeedback,
-  ] = useState<string | null>(
-    null
-  );
-
-  const [
-    scanHistory,
-    setScanHistory,
-  ] = useState<
+  const [scanHistory, setScanHistory] = useState<
     ScanHistoryRecord[]
   >([]);
 
-  /*
-   Load real scan telemetry
-   from localStorage
-  */
-  const loadScanHistory = () => {
-    try {
-      const savedHistory =
-        localStorage.getItem(
-          STORAGE_KEY
-        );
+  const [isLoadingHistory, setIsLoadingHistory] =
+    useState(false);
 
-      if (!savedHistory) {
-        setScanHistory([]);
-        return;
+  const [historyError, setHistoryError] =
+    useState('');
+
+  /*
+   * Convert backend verdict
+   */
+  const mapVerdict = (
+    verdict: string
+  ): ScanHistoryRecord['status'] => {
+    const value = String(verdict || '').toLowerCase();
+
+    if (value === 'phishing') {
+      return 'Phishing';
+    }
+
+    if (value === 'suspicious') {
+      return 'Suspicious';
+    }
+
+    return 'Safe';
+  };
+
+  /*
+   * Format backend timestamp
+   */
+  const formatTime = (raw: string) => {
+    if (!raw) {
+      return 'Unknown';
+    }
+
+    try {
+      const normalized = raw.includes('T')
+        ? raw
+        : `${raw.replace(' ', 'T')}Z`;
+
+      const date = new Date(normalized);
+
+      if (!Number.isNaN(date.getTime())) {
+        return date.toLocaleString();
+      }
+    } catch {
+      // fallback
+    }
+
+    return raw;
+  };
+
+  /*
+   * REAL DATABASE HISTORY
+   *
+   * Data comes from:
+   * Flask -> SQLite -> /api/history
+   */
+  const loadScanHistory = useCallback(async () => {
+    setIsLoadingHistory(true);
+    setHistoryError('');
+
+    try {
+     const token =
+  localStorage.getItem('phishguard_token') || '';
+
+const response = await fetch(
+  `${API_BASE}/history`,
+  {
+    headers: token
+      ? {
+          Authorization: `Bearer ${token}`,
+        }
+      : {},
+  }
+);
+      if (!response.ok) {
+        throw new Error(
+          `History API returned HTTP ${response.status}`
+        );
       }
 
-      const parsedHistory =
-        JSON.parse(savedHistory);
+      const data = await response.json();
 
       if (
-        Array.isArray(
-          parsedHistory
-        )
+        data.status !== 'success' ||
+        !Array.isArray(data.scans)
       ) {
-        const sortedHistory =
-          parsedHistory.sort(
+        throw new Error(
+          data.message ||
+            'Invalid response from history API'
+        );
+      }
+
+      const mapped: ScanHistoryRecord[] =
+        data.scans
+          .map((scan: BackendScan) => ({
+            id: `SCAN-${scan.id}`,
+
+            url: scan.url,
+
+            status: mapVerdict(
+              scan.verdict
+            ),
+
+            risk: Math.round(
+              Number(
+                scan.risk_score ?? 0
+              )
+            ),
+
+            time: formatTime(
+              scan.scanned_at
+            ),
+
+            source:
+              scan.domain ||
+              'PhishGuard AI',
+
+            createdAt:
+              scan.scanned_at,
+          }))
+          .sort(
             (
               a: ScanHistoryRecord,
               b: ScanHistoryRecord
@@ -126,35 +173,33 @@ export default function SocCommandCenter({
               ).getTime()
           );
 
-        setScanHistory(
-          sortedHistory
-        );
-      }
-    } catch {
+      setScanHistory(mapped);
+    } catch (error) {
+      console.error(
+        'Dashboard history error:',
+        error
+      );
+
+      setHistoryError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to load scan history.'
+      );
+
       setScanHistory([]);
+    } finally {
+      setIsLoadingHistory(false);
     }
-  };
+  }, []);
 
   /*
-   Load scans when
-   dashboard opens
-  */
+   * Load database history
+   */
   useEffect(() => {
-    loadScanHistory();
+    void loadScanHistory();
 
     const handleFocus = () => {
-      loadScanHistory();
-    };
-
-    const handleStorage = (
-      event: StorageEvent
-    ) => {
-      if (
-        event.key ===
-        STORAGE_KEY
-      ) {
-        loadScanHistory();
-      }
+      void loadScanHistory();
     };
 
     window.addEventListener(
@@ -162,24 +207,84 @@ export default function SocCommandCenter({
       handleFocus
     );
 
-    window.addEventListener(
-      'storage',
-      handleStorage
-    );
-
     return () => {
       window.removeEventListener(
         'focus',
         handleFocus
       );
-
-      window.removeEventListener(
-        'storage',
-        handleStorage
-      );
     };
-  }, []);
+  }, [loadScanHistory]);
 
+  /*
+   * REAL DASHBOARD METRICS
+   */
+  const totalScans =
+    scanHistory.length;
+
+  const safeCount =
+    scanHistory.filter(
+      (scan) =>
+        scan.status === 'Safe'
+    ).length;
+
+  const suspiciousCount =
+    scanHistory.filter(
+      (scan) =>
+        scan.status === 'Suspicious'
+    ).length;
+
+  const phishingCount =
+    scanHistory.filter(
+      (scan) =>
+        scan.status === 'Phishing'
+    ).length;
+
+  const averageRisk =
+    totalScans > 0
+      ? Math.round(
+          scanHistory.reduce(
+            (sum, scan) =>
+              sum + scan.risk,
+            0
+          ) / totalScans
+        )
+      : 0;
+
+  const highestRisk =
+    totalScans > 0
+      ? Math.max(
+          ...scanHistory.map(
+            (scan) => scan.risk
+          )
+        )
+      : 0;
+
+  const threatRate =
+    totalScans > 0
+      ? Math.round(
+          ((phishingCount +
+            suspiciousCount) /
+            totalScans) *
+            100
+        )
+      : 0;
+
+  const recentScans =
+    useMemo(
+      () =>
+        scanHistory.slice(
+          0,
+          8
+        ),
+      [scanHistory]
+    );
+
+  /*
+   * QUICK SCAN
+   *
+   * No fake setTimeout.
+   * Opens actual Neural URL Scanner.
+   */
   const handleQuickScan = () => {
     const url =
       quickInputUrl.trim();
@@ -194,229 +299,119 @@ export default function SocCommandCenter({
     setIsScanning(true);
 
     setScanFeedback(
-      null
+      'Opening URL Scanner...'
     );
 
-    setTimeout(() => {
-      setIsScanning(false);
+    /*
+     * NeuralUrlScanner will perform
+     * the actual POST /api/scan.
+     */
+    onScanUrl(url);
 
-      setScanFeedback(
-        'Opening URL Scanner...'
-      );
-
-      setTimeout(() => {
-        onScanUrl(url);
-      }, 500);
-    }, 600);
+    setQuickInputUrl('');
+    setIsScanning(false);
   };
 
   /*
-   REAL TELEMETRY
-   CALCULATIONS
-  */
-
-  const totalScans =
-    scanHistory.length;
-
-  const safeCount =
-    scanHistory.filter(
-      (scan) =>
-        scan.status === 'Safe'
-    ).length;
-
-  const suspiciousCount =
-    scanHistory.filter(
-      (scan) =>
-        scan.status ===
-        'Suspicious'
-    ).length;
-
-  const phishingCount =
-    scanHistory.filter(
-      (scan) =>
-        scan.status ===
-        'Phishing'
-    ).length;
-
-  const averageRisk =
-    totalScans > 0
-      ? Math.round(
-          scanHistory.reduce(
-            (
-              total,
-              scan
-            ) =>
-              total +
-              scan.risk,
-            0
-          ) /
-            totalScans
-        )
-      : 0;
-
-  const highestRisk =
-    totalScans > 0
-      ? Math.max(
-          ...scanHistory.map(
-            (scan) =>
-              scan.risk
-          )
-        )
-      : 0;
-
-  const recentScans =
-    scanHistory.slice(
-      0,
-      6
-    );
-
-  const getStatusStyle = (
-    status: ScanHistoryRecord['status']
+   * Playbook click
+   */
+  const handlePlaybookClick = (
+    module: PlaybookModule
   ) => {
-    if (
-      status ===
-      'Phishing'
-    ) {
-      return {
-        text:
-          'text-red-400',
-        bg:
-          'bg-red-500/10 border-red-500/20',
-        icon:
-          'text-red-400',
-      };
-    }
-
-    if (
-      status ===
-      'Suspicious'
-    ) {
-      return {
-        text:
-          'text-orange-400',
-        bg:
-          'bg-orange-500/10 border-orange-500/20',
-        icon:
-          'text-orange-400',
-      };
-    }
-
-    return {
-      text:
-        'text-emerald-400',
-      bg:
-        'bg-emerald-500/10 border-emerald-500/20',
-      icon:
-        'text-emerald-400',
-    };
-  };
-
-  const getRiskColor = (
-    risk: number
-  ) => {
-    if (
-      risk >= 70
-    ) {
-      return 'text-red-400';
-    }
-
-    if (
-      risk >= 40
-    ) {
-      return 'text-orange-400';
-    }
-
-    return 'text-emerald-400';
+    onOpenPlaybook(module);
   };
 
   return (
-    <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <div className="min-h-full bg-[#080b12] text-white">
 
-      {/* Top Banner */}
-      <div className="rounded-2xl bg-[#141722] border border-[#242a38] p-5 sm:p-6 shadow-xl relative overflow-hidden">
+      {/* =========================
+          HEADER
+      ========================== */}
 
-        <div className="absolute right-0 top-0 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="border-b border-[#202638] bg-[#0c101a] px-6 py-5">
 
-        <div className="absolute left-1/4 bottom-0 w-64 h-64 bg-teal-500/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="flex items-center justify-between">
 
-        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-3">
 
-          <div className="space-y-2">
-
-            <div className="flex items-center gap-2">
-
-              <span className="relative flex h-2.5 w-2.5">
-
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75" />
-
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-teal-500" />
-
+              <span className="material-symbols-outlined text-[28px] text-[#4fdbc8]">
+                security
               </span>
 
-              <span className="text-xs font-mono font-bold tracking-wider text-teal-400 uppercase">
-                PhishGuard AI Security Center
-              </span>
+              <div>
+                <h1 className="text-xl font-bold">
+                  SOC Command Center
+                </h1>
+
+                <p className="mt-1 text-xs text-[#7d8597]">
+                  PhishGuard AI security
+                  operations dashboard
+                </p>
+              </div>
 
             </div>
-
-            <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-              Intelligent Phishing Detection
-            </h1>
-
-            <p className="text-xs sm:text-sm text-zinc-400 max-w-2xl">
-              Scan suspicious URLs and analyze potential phishing threats using intelligent security analysis.
-            </p>
-
           </div>
 
           <button
             onClick={() =>
-              setQuickScanOpen(
-                !quickScanOpen
-              )
+              void loadScanHistory()
             }
-            className="px-5 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-violet-500 hover:from-purple-500 hover:to-violet-400 text-white font-bold text-sm shadow-lg flex items-center gap-2 active:scale-95 transition-all"
+            disabled={isLoadingHistory}
+            className="flex items-center gap-2 rounded-lg border border-[#293044] bg-[#121826] px-4 py-2 text-xs font-semibold text-[#c7cedd] transition hover:bg-[#181f2e] disabled:opacity-50"
           >
 
-            <Radar className="w-4 h-4" />
+            <span
+              className={`material-symbols-outlined text-[16px] ${
+                isLoadingHistory
+                  ? 'animate-spin'
+                  : ''
+              }`}
+            >
+              refresh
+            </span>
 
-            Scan URL
-
+            Refresh
           </button>
 
         </div>
+      </div>
 
-        {/* Quick Scanner */}
-        {quickScanOpen && (
+      {/* =========================
+          MAIN
+      ========================== */}
 
-          <div className="mt-5 pt-5 border-t border-[#242a38] space-y-3">
+      <main className="space-y-6 p-6">
 
-            <div className="flex items-center justify-between">
+        {/* =========================
+            QUICK SCAN
+        ========================== */}
 
-              <span className="text-xs font-mono font-semibold text-purple-300">
-                Quick URL Scan
+        <section className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+          <div className="mb-4">
+
+            <h2 className="text-base font-bold">
+              Quick URL Scan
+            </h2>
+
+            <p className="mt-1 text-xs text-[#7d8597]">
+              Send a URL to the real
+              PhishGuard detection engine.
+            </p>
+
+          </div>
+
+          <div className="flex flex-col gap-3 md:flex-row">
+
+            <div className="relative flex-1">
+
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[19px] text-[#697287]">
+                link
               </span>
 
-              <button
-                onClick={() =>
-                  setQuickScanOpen(
-                    false
-                  )
-                }
-                className="text-zinc-500 hover:text-zinc-300 text-xs"
-              >
-                Close
-              </button>
-
-            </div>
-
-            <div className="relative flex items-center">
-
               <input
-                type="text"
-                value={
-                  quickInputUrl
-                }
+                value={quickInputUrl}
                 onChange={(e) =>
                   setQuickInputUrl(
                     e.target.value
@@ -424,446 +419,465 @@ export default function SocCommandCenter({
                 }
                 onKeyDown={(e) => {
                   if (
-                    e.key ===
-                    'Enter'
+                    e.key === 'Enter'
                   ) {
                     handleQuickScan();
                   }
                 }}
-                placeholder="Paste a URL to scan..."
-                className="w-full h-11 pl-4 pr-28 rounded-xl bg-[#0d0f15] border border-[#2a3142] text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-purple-500 font-mono"
+                placeholder="https://example.com"
+                className="w-full rounded-xl border border-[#293044] bg-[#0a0f18] py-3 pl-10 pr-4 text-sm text-white outline-none transition placeholder:text-[#515a6d] focus:border-[#4fdbc8]"
               />
 
-              <button
-                disabled={
-                  isScanning
-                }
-                onClick={
-                  handleQuickScan
-                }
-                className="absolute right-1.5 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs disabled:opacity-50 transition-all"
-              >
-
-                {isScanning
-                  ? 'Opening...'
-                  : 'Analyze'}
-
-              </button>
-
             </div>
-
-            {scanFeedback && (
-
-              <div className="p-3 rounded-lg bg-teal-950/30 border border-teal-500/30 text-xs text-teal-300 flex items-center gap-2">
-
-                <CheckCircle2 className="w-4 h-4 text-teal-400" />
-
-                {scanFeedback}
-
-              </div>
-
-            )}
-
-          </div>
-
-        )}
-
-      </div>
-
-      {/* Statistics */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-
-        {/* Total Scans */}
-        <div className="rounded-2xl bg-[#141722] border border-[#242a38] p-5">
-
-          <div className="flex items-center justify-between">
-
-            <span className="text-xs font-bold uppercase tracking-wider text-zinc-400 font-mono">
-              Total Scans
-            </span>
-
-            <div className="w-9 h-9 rounded-xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400">
-
-              <Activity className="w-4 h-4" />
-
-            </div>
-
-          </div>
-
-          <div className="mt-3 text-3xl font-bold text-white">
-            {totalScans}
-          </div>
-
-          <p className="mt-1 text-xs text-zinc-500">
-            {totalScans === 0
-              ? 'No scans recorded yet'
-              : 'Total URLs analyzed'}
-          </p>
-
-        </div>
-
-        {/* Safe Websites */}
-        <div className="rounded-2xl bg-[#141722] border border-emerald-500/20 p-5">
-
-          <div className="flex items-center justify-between">
-
-            <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 font-mono">
-              Safe Websites
-            </span>
-
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-400">
-
-              <ShieldCheck className="w-4 h-4" />
-
-            </div>
-
-          </div>
-
-          <div className="mt-3 text-3xl font-bold text-white">
-            {safeCount}
-          </div>
-
-          <p className="mt-1 text-xs text-zinc-500">
-            {safeCount === 0
-              ? 'No safe URLs yet'
-              : 'Legitimate URLs detected'}
-          </p>
-
-        </div>
-
-        {/* Suspicious */}
-        <div className="rounded-2xl bg-[#141722] border border-orange-500/20 p-5">
-
-          <div className="flex items-center justify-between">
-
-            <span className="text-xs font-bold uppercase tracking-wider text-orange-400 font-mono">
-              Suspicious Websites
-            </span>
-
-            <div className="w-9 h-9 rounded-xl bg-orange-500/10 flex items-center justify-center text-orange-400">
-
-              <AlertTriangle className="w-4 h-4" />
-
-            </div>
-
-          </div>
-
-          <div className="mt-3 text-3xl font-bold text-white">
-            {suspiciousCount}
-          </div>
-
-          <p className="mt-1 text-xs text-zinc-500">
-            {suspiciousCount === 0
-              ? 'No suspicious URLs detected'
-              : 'URLs require caution'}
-          </p>
-
-        </div>
-
-        {/* Phishing */}
-        <div className="rounded-2xl bg-[#141722] border border-red-500/20 p-5">
-
-          <div className="flex items-center justify-between">
-
-            <span className="text-xs font-bold uppercase tracking-wider text-red-400 font-mono">
-              Phishing Websites
-            </span>
-
-            <div className="w-9 h-9 rounded-xl bg-red-500/10 flex items-center justify-center text-red-400">
-
-              <Flame className="w-4 h-4" />
-
-            </div>
-
-          </div>
-
-          <div className="mt-3 text-3xl font-bold text-white">
-            {phishingCount}
-          </div>
-
-          <p className="mt-1 text-xs text-zinc-500">
-            {phishingCount === 0
-              ? 'No phishing threats detected'
-              : 'High-risk threats found'}
-          </p>
-
-        </div>
-
-      </div>
-
-      {/* Risk Analytics */}
-      <div className="rounded-2xl bg-[#141722] border border-[#242a38] p-6">
-
-        <div className="flex items-center justify-between mb-6">
-
-          <div>
-
-            <h2 className="text-lg font-bold text-white">
-              Risk Analytics
-            </h2>
-
-            <p className="text-xs text-zinc-400 mt-1">
-              Real-time analytics generated from URL scan telemetry.
-            </p>
-
-          </div>
-
-          <TrendingUp className="w-5 h-5 text-purple-400" />
-
-        </div>
-
-        {totalScans === 0 ? (
-
-          <div className="min-h-[220px] rounded-xl bg-[#0f1118] border border-[#222736] flex flex-col items-center justify-center text-center p-6">
-
-            <Activity className="w-10 h-10 text-zinc-600 mb-3" />
-
-            <h3 className="text-sm font-semibold text-zinc-300">
-              No Analytics Available
-            </h3>
-
-            <p className="text-xs text-zinc-500 mt-2 max-w-md">
-              Perform URL scans to generate risk scores, detection statistics, and threat analytics.
-            </p>
-
-          </div>
-
-        ) : (
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-
-            {/* Average Risk */}
-            <div className="rounded-xl bg-[#0f1118] border border-[#242a38] p-5">
-
-              <p className="text-xs uppercase font-mono text-zinc-500">
-                Average Risk
-              </p>
-
-              <div className={`mt-3 text-3xl font-bold ${getRiskColor(
-                averageRisk
-              )}`}>
-                {averageRisk}
-                <span className="text-sm text-zinc-500">
-                  /100
-                </span>
-              </div>
-
-              <p className="mt-2 text-xs text-zinc-500">
-                Average threat score across all scans
-              </p>
-
-            </div>
-
-            {/* Highest Risk */}
-            <div className="rounded-xl bg-[#0f1118] border border-[#242a38] p-5">
-
-              <p className="text-xs uppercase font-mono text-zinc-500">
-                Highest Risk
-              </p>
-
-              <div className={`mt-3 text-3xl font-bold ${getRiskColor(
-                highestRisk
-              )}`}>
-                {highestRisk}
-                <span className="text-sm text-zinc-500">
-                  /100
-                </span>
-              </div>
-
-              <p className="mt-2 text-xs text-zinc-500">
-                Highest threat score detected
-              </p>
-
-            </div>
-
-            {/* Threat Rate */}
-            <div className="rounded-xl bg-[#0f1118] border border-[#242a38] p-5">
-
-              <p className="text-xs uppercase font-mono text-zinc-500">
-                Threat Rate
-              </p>
-
-              <div className="mt-3 text-3xl font-bold text-red-400">
-
-                {Math.round(
-                  (
-                    (phishingCount +
-                      suspiciousCount) /
-                    totalScans
-                  ) *
-                    100
-                )}
-                %
-
-              </div>
-
-              <p className="mt-2 text-xs text-zinc-500">
-                Suspicious and phishing URLs
-              </p>
-
-            </div>
-
-          </div>
-
-        )}
-
-      </div>
-
-      {/* AI Protection */}
-      <div className="rounded-2xl bg-gradient-to-r from-purple-950/30 via-[#161324] to-[#12141c] border border-purple-500/30 p-5 sm:p-6">
-
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-
-          <div className="flex items-center gap-3">
-
-            <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300">
-
-              <Bot className="w-5 h-5" />
-
-            </div>
-
-            <div>
-
-              <h2 className="text-lg font-bold text-white">
-                AI Security Assistant
-              </h2>
-
-              <p className="text-xs text-zinc-400">
-                Ask cybersecurity questions and get assistance with phishing awareness.
-              </p>
-
-            </div>
-
-          </div>
-
-          <button
-            onClick={
-              onNavigateToChatbot
-            }
-            className="px-4 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-200 border border-purple-500/40 text-xs font-bold flex items-center gap-2 transition-all"
-          >
-
-            <Sparkles className="w-4 h-4" />
-
-            Open AI Chatbot
-
-            <ChevronRight className="w-3.5 h-3.5" />
-
-          </button>
-
-        </div>
-
-      </div>
-
-      {/* Recent Scan Activity */}
-      <div className="rounded-2xl bg-[#141722] border border-[#242a38] p-5 sm:p-6">
-
-        <div className="flex items-center justify-between mb-5">
-
-          <div className="flex items-center gap-2.5">
-
-            <Search className="w-5 h-5 text-purple-400" />
-
-            <div>
-
-              <h2 className="text-lg font-bold text-white">
-                Recent Scan Activity
-              </h2>
-
-              <p className="text-xs text-zinc-400">
-                Latest telemetry from your scanned URLs.
-              </p>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {recentScans.length ===
-        0 ? (
-
-          <div className="min-h-[180px] rounded-xl border border-[#242a38] bg-[#0f1118] flex flex-col items-center justify-center text-center p-6">
-
-            <Search className="w-10 h-10 text-zinc-600 mb-3" />
-
-            <h3 className="text-sm font-semibold text-zinc-300">
-              No Scans Yet
-            </h3>
-
-            <p className="text-xs text-zinc-500 mt-2">
-              Scan a suspicious URL to see its results here.
-            </p>
 
             <button
-              onClick={() =>
-                setQuickScanOpen(
-                  true
-                )
-              }
-              className="mt-4 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold"
+              onClick={handleQuickScan}
+              disabled={isScanning}
+              className="flex items-center justify-center gap-2 rounded-xl bg-[#4fdbc8] px-6 py-3 text-sm font-bold text-[#07100f] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Scan Your First URL
+
+              <span className="material-symbols-outlined text-[19px]">
+                search
+              </span>
+
+              {isScanning
+                ? 'Opening...'
+                : 'Scan URL'}
+
             </button>
 
           </div>
 
-        ) : (
+          {scanFeedback && (
+            <p className="mt-3 text-xs text-[#4fdbc8]">
+              {scanFeedback}
+            </p>
+          )}
 
-          <div className="space-y-3">
+        </section>
 
-            {recentScans.map(
-              (scan) => {
-                const style =
-                  getStatusStyle(
-                    scan.status
-                  );
+        {/* =========================
+            METRICS
+        ========================== */}
 
-                return (
+        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
 
-                  <div
-                    key={scan.id}
-                    onClick={() =>
-                      onScanUrl(
-                        scan.url
-                      )
-                    }
-                    className="cursor-pointer rounded-xl border border-[#242a38] bg-[#0f1118] p-4 hover:border-purple-500/40 transition-all"
-                  >
+          {/* Total */}
 
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
 
-                      <div className="flex items-center gap-3 min-w-0">
+            <div className="flex items-center justify-between">
 
-                        <div className={`w-10 h-10 shrink-0 rounded-xl border flex items-center justify-center ${style.bg}`}>
+              <span className="text-xs text-[#7d8597]">
+                Total Scans
+              </span>
 
-                          {scan.status ===
-                          'Phishing' ? (
+              <span className="material-symbols-outlined text-[20px] text-[#8b7cff]">
+                analytics
+              </span>
 
-                            <ShieldAlert className="w-5 h-5 text-red-400" />
+            </div>
 
-                          ) : scan.status ===
-                            'Suspicious' ? (
+            <p className="mt-3 text-2xl font-bold">
+              {totalScans}
+            </p>
 
-                            <AlertTriangle className="w-5 h-5 text-orange-400" />
+            <p className="mt-1 text-[10px] text-[#596174]">
+              Persisted database records
+            </p>
 
-                          ) : (
+          </div>
 
-                            <ShieldCheck className="w-5 h-5 text-emerald-400" />
+          {/* Safe */}
 
-                          )}
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+            <div className="flex items-center justify-between">
+
+              <span className="text-xs text-[#7d8597]">
+                Safe
+              </span>
+
+              <span className="material-symbols-outlined text-[20px] text-[#4fdbc8]">
+                verified
+              </span>
+
+            </div>
+
+            <p className="mt-3 text-2xl font-bold text-[#4fdbc8]">
+              {safeCount}
+            </p>
+
+          </div>
+
+          {/* Suspicious */}
+
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+            <div className="flex items-center justify-between">
+
+              <span className="text-xs text-[#7d8597]">
+                Suspicious
+              </span>
+
+              <span className="material-symbols-outlined text-[20px] text-[#f59e0b]">
+                warning
+              </span>
+
+            </div>
+
+            <p className="mt-3 text-2xl font-bold text-[#f59e0b]">
+              {suspiciousCount}
+            </p>
+
+          </div>
+
+          {/* Phishing */}
+
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+            <div className="flex items-center justify-between">
+
+              <span className="text-xs text-[#7d8597]">
+                Phishing
+              </span>
+
+              <span className="material-symbols-outlined text-[20px] text-[#ff5451]">
+                  warning
+              </span>
+
+            </div>
+
+            <p className="mt-3 text-2xl font-bold text-[#ff5451]">
+              {phishingCount}
+            </p>
+
+          </div>
+
+          {/* Average */}
+
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+            <div className="flex items-center justify-between">
+
+              <span className="text-xs text-[#7d8597]">
+                Avg Risk
+              </span>
+
+              <span className="material-symbols-outlined text-[20px] text-[#c084fc]">
+                speed
+              </span>
+
+            </div>
+
+            <p className="mt-3 text-2xl font-bold">
+              {averageRisk}
+              <span className="ml-1 text-sm text-[#596174]">
+                /100
+              </span>
+            </p>
+
+          </div>
+
+          {/* Threat rate */}
+
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+            <div className="flex items-center justify-between">
+
+              <span className="text-xs text-[#7d8597]">
+                Threat Rate
+              </span>
+
+              <span className="material-symbols-outlined text-[20px] text-[#ff5451]">
+                trending_up
+              </span>
+
+            </div>
+
+            <p className="mt-3 text-2xl font-bold">
+              {threatRate}%
+            </p>
+
+            <p className="mt-1 text-[10px] text-[#596174]">
+              Suspicious + phishing
+            </p>
+
+          </div>
+
+        </section>
+
+        {/* =========================
+            ANALYTICS
+        ========================== */}
+
+        <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5 lg:col-span-2">
+
+            <div className="flex items-center justify-between">
+
+              <div>
+                <h2 className="text-base font-bold">
+                  Risk Analytics
+                </h2>
+
+                <p className="mt-1 text-xs text-[#7d8597]">
+                  Analytics generated from
+                  persisted URL scan telemetry.
+                </p>
+              </div>
+
+              <span className="rounded-full border border-[#293044] bg-[#0a0f18] px-3 py-1 text-[10px] font-semibold text-[#7d8597]">
+                SQLITE
+              </span>
+
+            </div>
+
+            <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+
+              <div className="rounded-xl border border-[#232a3a] bg-[#0b101a] p-4">
+
+                <p className="text-[10px] uppercase tracking-wider text-[#697287]">
+                  Highest Risk
+                </p>
+
+                <p className="mt-2 text-2xl font-bold text-[#ff5451]">
+                  {highestRisk}
+                </p>
+
+              </div>
+
+              <div className="rounded-xl border border-[#232a3a] bg-[#0b101a] p-4">
+
+                <p className="text-[10px] uppercase tracking-wider text-[#697287]">
+                  Threat Records
+                </p>
+
+                <p className="mt-2 text-2xl font-bold">
+                  {phishingCount +
+                    suspiciousCount}
+                </p>
+
+              </div>
+
+              <div className="rounded-xl border border-[#232a3a] bg-[#0b101a] p-4">
+
+                <p className="text-[10px] uppercase tracking-wider text-[#697287]">
+                  Database Status
+                </p>
+
+                <div className="mt-2 flex items-center gap-2">
+
+                  <span className="h-2 w-2 rounded-full bg-[#4fdbc8]" />
+
+                  <span className="text-sm font-semibold text-[#4fdbc8]">
+                    Connected
+                  </span>
+
+                </div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+          {/* System status */}
+
+          <div className="rounded-2xl border border-[#232a3a] bg-[#101521] p-5">
+
+            <h2 className="text-base font-bold">
+              Detection Pipeline
+            </h2>
+
+            <p className="mt-1 text-xs text-[#7d8597]">
+              Current backend components
+            </p>
+
+            <div className="mt-5 space-y-3">
+
+              {[
+                'ML Phishing Model',
+                'Domain Intelligence',
+                'Risk Engine',
+                'SSL Analyzer',
+                'SQLite Scan History',
+              ].map((item) => (
+                <div
+                  key={item}
+                  className="flex items-center justify-between rounded-lg border border-[#232a3a] bg-[#0b101a] px-3 py-3"
+                >
+
+                  <span className="text-xs text-[#c7cedd]">
+                    {item}
+                  </span>
+
+                  <span className="flex items-center gap-2 text-[10px] font-bold uppercase text-[#4fdbc8]">
+
+                    <span className="h-1.5 w-1.5 rounded-full bg-[#4fdbc8]" />
+
+                    Active
+
+                  </span>
+
+                </div>
+              ))}
+
+            </div>
+
+          </div>
+
+        </section>
+
+        {/* =========================
+            RECENT SCANS
+        ========================== */}
+
+        <section className="rounded-2xl border border-[#232a3a] bg-[#101521]">
+
+          <div className="flex items-center justify-between border-b border-[#232a3a] px-5 py-4">
+
+            <div>
+
+              <h2 className="text-base font-bold">
+                Recent Scan Activity
+              </h2>
+
+              <p className="mt-1 text-xs text-[#7d8597]">
+                Latest records from SQLite
+                scan history.
+              </p>
+
+            </div>
+
+            <button
+              onClick={() =>
+                void loadScanHistory()
+              }
+              className="text-xs font-semibold text-[#4fdbc8] hover:underline"
+            >
+              Refresh
+            </button>
+
+          </div>
+
+          {historyError ? (
+
+            <div className="px-5 py-12 text-center">
+
+              <span className="material-symbols-outlined text-[38px] text-[#ff5451]">
+                cloud_off
+              </span>
+
+              <p className="mt-3 text-sm font-semibold">
+                Unable to load database telemetry
+              </p>
+
+              <p className="mt-1 text-xs text-[#7d8597]">
+                {historyError}
+              </p>
+
+              <button
+                onClick={() =>
+                  void loadScanHistory()
+                }
+                className="mt-4 rounded-lg border border-[#293044] bg-[#171d2a] px-4 py-2 text-xs font-semibold"
+              >
+                Retry
+              </button>
+
+            </div>
+
+          ) : isLoadingHistory ? (
+
+            <div className="flex items-center justify-center py-16">
+
+              <span className="material-symbols-outlined animate-spin text-[30px] text-[#4fdbc8]">
+                progress_activity
+              </span>
+
+            </div>
+
+          ) : recentScans.length === 0 ? (
+
+            <div className="px-5 py-16 text-center">
+
+              <span className="material-symbols-outlined text-[40px] text-[#495064]">
+                history
+              </span>
+
+              <p className="mt-3 text-sm font-semibold">
+                No scans yet
+              </p>
+
+              <p className="mt-1 text-xs text-[#7d8597]">
+                Scan a URL to create your
+                first database record.
+              </p>
+
+            </div>
+
+          ) : (
+
+            <div className="divide-y divide-[#232a3a]">
+
+              {recentScans.map(
+                (scan) => {
+
+                  const statusColor =
+                    scan.status ===
+                    'Phishing'
+                      ? 'text-[#ff5451]'
+                      : scan.status ===
+                        'Suspicious'
+                        ? 'text-[#f59e0b]'
+                        : 'text-[#4fdbc8]';
+
+                  const statusIcon =
+                    scan.status ===
+                    'Phishing'
+                      ? 'dangerous'
+                      : scan.status ===
+                        'Suspicious'
+                        ? 'warning'
+                        : 'verified';
+
+                  return (
+                    <div
+                      key={scan.id}
+                      className="flex flex-col gap-3 px-5 py-4 transition hover:bg-[#0c111c] md:flex-row md:items-center md:justify-between"
+                    >
+
+                      <div className="min-w-0">
+
+                        <div className="flex items-center gap-2">
+
+                          <span
+                            className={`material-symbols-outlined text-[18px] ${statusColor}`}
+                          >
+                            {statusIcon}
+                          </span>
+
+                          <span className="truncate text-sm font-semibold text-white">
+                            {scan.url}
+                          </span>
 
                         </div>
 
-                        <div className="min-w-0">
+                        <div className="mt-1 flex flex-wrap gap-3 text-[10px] text-[#697287]">
 
-                          <p className="text-sm font-semibold text-white truncate max-w-[500px]">
-                            {scan.url}
-                          </p>
+                          <span>
+                            {scan.id}
+                          </span>
 
-                          <p className="text-xs text-zinc-500 mt-1">
+                          <span>
+                            {scan.source}
+                          </span>
+
+                          <span>
                             {scan.time}
-                          </p>
+                          </span>
 
                         </div>
 
@@ -873,138 +887,108 @@ export default function SocCommandCenter({
 
                         <div className="text-right">
 
-                          <p className="text-[10px] uppercase text-zinc-500">
-                            Risk Score
+                          <p className="text-[10px] uppercase tracking-wider text-[#596174]">
+                            Risk
                           </p>
 
-                          <p className={`text-sm font-bold ${getRiskColor(
-                            scan.risk
-                          )}`}>
+                          <p
+                            className={`text-sm font-bold ${statusColor}`}
+                          >
                             {scan.risk}/100
                           </p>
 
                         </div>
 
-                        <span className={`px-3 py-1 rounded-full border text-[10px] font-bold ${style.bg} ${style.text}`}>
+                        <span
+                          className={`rounded-full border px-3 py-1 text-[10px] font-bold uppercase ${statusColor}`}
+                        >
                           {scan.status}
                         </span>
 
                       </div>
 
                     </div>
-
-                  </div>
-
-                );
-              }
-            )}
-
-          </div>
-
-        )}
-
-      </div>
-
-      {/* Security Tips */}
-      <div className="rounded-2xl bg-[#141722] border border-[#242a38] p-5 sm:p-6">
-
-        <div className="flex items-center justify-between mb-4">
-
-          <div className="flex items-center gap-2.5">
-
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-
-              <Lightbulb className="w-4 h-4" />
+                  );
+                }
+              )}
 
             </div>
 
-            <div>
+          )}
 
-              <h2 className="text-lg font-bold text-white">
-                Security Tips & Defense Playbooks
-              </h2>
+        </section>
 
-              <p className="text-xs text-zinc-400">
-                Learn how to identify and avoid phishing attacks.
-              </p>
+        {/* =========================
+            SECURITY PLAYBOOKS
+        ========================== */}
 
-            </div>
+        <section>
+
+          <div className="mb-4">
+
+            <h2 className="text-base font-bold">
+              Security Playbooks
+            </h2>
+
+            <p className="mt-1 text-xs text-[#7d8597]">
+              Incident response and security
+              investigation modules.
+            </p>
 
           </div>
 
-          <button
-            onClick={
-              onNavigateToTips
-            }
-            className="text-xs font-mono text-teal-400 hover:text-teal-300 font-semibold flex items-center gap-1"
-          >
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
 
-            View All Tips
-
-            <ChevronRight className="w-3.5 h-3.5" />
-
-          </button>
-
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-
-          {PLAYBOOK_MODULES
-            .slice(0, 3)
-            .map(
+            {PLAYBOOK_MODULES.map(
               (module) => (
 
-                <div
+                <button
                   key={module.id}
                   onClick={() =>
-                    onOpenPlaybook(
+                    handlePlaybookClick(
                       module
                     )
                   }
-                  className="p-4 rounded-xl bg-[#0f1118] border border-[#242a38] hover:border-purple-500/40 flex flex-col justify-between space-y-3 transition-all cursor-pointer group"
+                  className="group rounded-2xl border border-[#232a3a] bg-[#101521] p-5 text-left transition hover:border-[#3a455e] hover:bg-[#131a27]"
                 >
 
-                  <div className="space-y-2">
+                  <div className="flex items-start justify-between">
 
-                    <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#191f2f]">
 
-                      {module.tag}
+                      <span className="material-symbols-outlined text-[21px] text-[#4fdbc8]">
+                        security
+                      </span>
 
+                    </div>
+
+                    <span className="material-symbols-outlined text-[18px] text-[#4b5468] transition group-hover:text-[#4fdbc8]">
+                      arrow_forward
                     </span>
-
-                    <h3 className="text-sm font-bold text-white group-hover:text-purple-300 transition-colors">
-
-                      {module.title}
-
-                    </h3>
-
-                    <p className="text-xs text-zinc-400 line-clamp-2">
-
-                      {module.description}
-
-                    </p>
 
                   </div>
 
-                  <div className="pt-2 border-t border-[#1f2433] flex items-center justify-between text-xs font-semibold text-teal-400">
+                  <h3 className="mt-4 text-sm font-bold">
+                    {module.title}
+                  </h3>
 
-                    <span>
-                      Read Full Playbook
-                    </span>
+                  <p className="mt-2 line-clamp-3 text-xs leading-5 text-[#7d8597]">
+                    {module.description}
+                  </p>
 
-                    <ArrowRight className="w-3.5 h-3.5" />
-
-                  </div>
-
-                </div>
+                </button>
 
               )
             )}
 
-        </div>
+          </div>
 
-      </div>
+        </section>
+
+      </main>
 
     </div>
   );
-}
+};
+
+export default SocCommandCenter;

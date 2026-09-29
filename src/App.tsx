@@ -15,8 +15,45 @@ import SentinelAiAssistant from './components/SentinelAiAssistant';
 import SecurityTipsView from './components/SecurityTipsView';
 import ConfigSettings from './components/ConfigSettings';
 import PlaybookModal from './components/PlaybookModal';
+import AuthScreen from './components/AuthScreen';
+
+const API_BASE = 'http://127.0.0.1:5000';
+
+interface AuthUser {
+  id: number;
+  email: string;
+}
 
 export default function App() {
+  /* =========================
+      AUTH STATE
+  ========================== */
+
+  const [authToken, setAuthToken] =
+    useState<string | null>(() =>
+      localStorage.getItem('phishguard_token')
+    );
+
+  const [authUser, setAuthUser] =
+    useState<AuthUser | null>(() => {
+      const savedUser =
+        localStorage.getItem('phishguard_user');
+
+      if (!savedUser) {
+        return null;
+      }
+
+      try {
+        return JSON.parse(savedUser);
+      } catch {
+        return null;
+      }
+    });
+
+  /* =========================
+      APP STATE
+  ========================== */
+
   const [currentTab, setCurrentTab] =
     useState<NavTab>('dashboard');
 
@@ -62,6 +99,73 @@ export default function App() {
       },
     });
 
+  /* =========================
+      LOGIN
+  ========================== */
+
+  const handleLogin = (
+    token: string,
+    user: AuthUser
+  ) => {
+    localStorage.setItem(
+      'phishguard_token',
+      token
+    );
+
+    localStorage.setItem(
+      'phishguard_user',
+      JSON.stringify(user)
+    );
+
+    setAuthToken(token);
+    setAuthUser(user);
+  };
+
+  /* =========================
+      LOGOUT
+  ========================== */
+
+  const handleLogout = async () => {
+    const token =
+      localStorage.getItem(
+        'phishguard_token'
+      );
+
+    try {
+      if (token) {
+        await fetch(
+          `${API_BASE}/api/logout`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+      }
+    } catch (error) {
+      console.error(
+        'Logout error:',
+        error
+      );
+    }
+
+    localStorage.removeItem(
+      'phishguard_token'
+    );
+
+    localStorage.removeItem(
+      'phishguard_user'
+    );
+
+    setAuthToken(null);
+    setAuthUser(null);
+  };
+
+  /* =========================
+      TOAST
+  ========================== */
+
   const showToast = (
     message: string,
     isAlert: boolean = false
@@ -76,10 +180,10 @@ export default function App() {
     }, 3200);
   };
 
-  /*
-    Navigate any URL from Dashboard,
-    History or AI Assistant to Scanner
-  */
+  /* =========================
+      EXTERNAL URL → SCANNER
+  ========================== */
+
   const handleScanUrlFromExternal = (
     url: string
   ) => {
@@ -88,18 +192,20 @@ export default function App() {
     setMobileMenuOpen(false);
   };
 
-  /*
-    Open Scanner without URL
-  */
+  /* =========================
+      OPEN SCANNER
+  ========================== */
+
   const handleOpenScanner = () => {
     setTargetScanUrl('');
     setCurrentTab('scanner');
     setMobileMenuOpen(false);
   };
 
-  /*
-    Security Tips scanner navigation
-  */
+  /* =========================
+      SECURITY TIPS → SCANNER
+  ========================== */
+
   const handleTipsScanner = () => {
     handleOpenScanner();
 
@@ -107,6 +213,10 @@ export default function App() {
       'URL Scanner opened. Paste a suspicious website to analyze.'
     );
   };
+
+  /* =========================
+      RADAR
+  ========================== */
 
   const handleToggleRadar = () => {
     const next = !radarActive;
@@ -120,6 +230,10 @@ export default function App() {
     );
   };
 
+  /* =========================
+      TAB NAVIGATION
+  ========================== */
+
   const handleTabChange = (
     tab: NavTab
   ) => {
@@ -128,9 +242,10 @@ export default function App() {
     setMobileMenuOpen(false);
   };
 
-  /*
-    Tab aliases
-  */
+  /* =========================
+      TAB ALIASES
+  ========================== */
+
   const isDashboard =
     currentTab === 'dashboard' ||
     currentTab === 'soc';
@@ -153,6 +268,22 @@ export default function App() {
   const isSettings =
     currentTab === 'settings' ||
     currentTab === 'config';
+
+  /* =========================
+      AUTH GATE
+  ========================== */
+
+  if (!authToken) {
+    return (
+      <AuthScreen
+        onLogin={handleLogin}
+      />
+    );
+  }
+
+  /* =========================
+      MAIN APP
+  ========================== */
 
   return (
     <div
@@ -192,16 +323,14 @@ export default function App() {
             border-[#30394d]
           "
         >
-
           <span
             className={`
               w-2
               h-2
               rounded-full
-              ${
-                toast.isAlert
-                  ? 'bg-red-400 animate-ping'
-                  : 'bg-teal-400'
+              ${toast.isAlert
+                ? 'bg-red-400 animate-ping'
+                : 'bg-teal-400'
               }
             `}
           />
@@ -209,7 +338,6 @@ export default function App() {
           <span className="font-medium">
             {toast.message}
           </span>
-
         </div>
       )}
 
@@ -249,30 +377,25 @@ export default function App() {
           onQuickScanTrigger={
             handleOpenScanner
           }
+          onLogout={handleLogout}
         />
 
         {/* PAGE CONTENT */}
         <main className="flex-1 pb-12">
 
           {/* =========================
-              DASHBOARD / COMMAND CENTER
+              DASHBOARD
           ========================== */}
 
           {isDashboard && (
             <SocCommandCenter
-              onScanUrl={
-                handleScanUrlFromExternal
-              }
-              onOpenPlaybook={(playbook) =>
-                setActivePlaybook(playbook)
-              }
-              onNavigateToTips={() =>
-                handleTabChange('tips')
-              }
-              onNavigateToChatbot={() =>
-                handleTabChange('chatbot')
-              }
-            />
+  onScanUrl={
+    handleScanUrlFromExternal
+  }
+  onOpenPlaybook={(playbook) =>
+    setActivePlaybook(playbook)
+  }
+/>
           )}
 
           {/* =========================
@@ -291,7 +414,6 @@ export default function App() {
                 py-6
               "
             >
-
               <NeuralUrlScanner
                 initialUrl={targetScanUrl}
                 onNavigateToLogs={() =>
@@ -299,7 +421,6 @@ export default function App() {
                 }
                 onShowToast={showToast}
               />
-
             </div>
           )}
 
@@ -319,14 +440,12 @@ export default function App() {
                 py-6
               "
             >
-
               <TelemetryHistory
                 onShowToast={showToast}
                 onInspectUrl={
                   handleScanUrlFromExternal
                 }
               />
-
             </div>
           )}
 
@@ -346,14 +465,12 @@ export default function App() {
                 py-6
               "
             >
-
               <SentinelAiAssistant
                 onShowToast={showToast}
                 onInspectUrl={
                   handleScanUrlFromExternal
                 }
               />
-
             </div>
           )}
 
@@ -373,11 +490,9 @@ export default function App() {
                 py-6
               "
             >
-
               <SecurityTipsView
                 onShowToast={showToast}
               />
-
             </div>
           )}
 
@@ -397,7 +512,6 @@ export default function App() {
                 py-6
               "
             >
-
               <ConfigSettings
                 config={systemConfig}
                 onUpdateConfig={
@@ -405,12 +519,10 @@ export default function App() {
                 }
                 onShowToast={showToast}
               />
-
             </div>
           )}
 
         </main>
-
       </div>
 
       {/* PLAYBOOK MODAL */}
