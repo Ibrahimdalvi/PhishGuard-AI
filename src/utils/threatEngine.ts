@@ -302,3 +302,4 @@ export function analyzeUrl(inputUrl: string): ScanAnalysisResult {
     }
   };
 }
+

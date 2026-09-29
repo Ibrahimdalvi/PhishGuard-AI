@@ -35,7 +35,7 @@ export default function Sidebar({
   localStorage.getItem('phishguard_token') || '';
 
 const response = await fetch(
-  'http://127.0.0.1:5000/api/history',
+  'https://phishguard-ai-85s9.onrender.com/api/history',
   {
     headers: token
       ? {
@@ -65,7 +65,7 @@ const response = await fetch(
   useEffect(() => {
     const fetchScanCount = async () => {
       try {
-        const response = await fetch('http://127.0.0.1:5000/api/history');
+        const response = await fetch('https://phishguard-ai-85s9.onrender.com/api/history');
 
         if (!response.ok) {
           throw new Error(`History API returned HTTP ${response.status}`);
@@ -317,3 +317,4 @@ const response = await fetch(
     </>
   );
 }
+

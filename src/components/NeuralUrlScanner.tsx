@@ -169,7 +169,7 @@ type BackendScanResponse = {
 }
 
 const API_URL =
-  'http://127.0.0.1:5000/api/scan';
+  'https://phishguard-ai-85s9.onrender.com/api/scan';
 
 const getAuthHeaders = (): Record<string, string> => {
   const token = localStorage.getItem('phishguard_token') || '';

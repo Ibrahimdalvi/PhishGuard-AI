@@ -17,7 +17,7 @@ import ConfigSettings from './components/ConfigSettings';
 import PlaybookModal from './components/PlaybookModal';
 import AuthScreen from './components/AuthScreen';
 
-const API_BASE = 'http://127.0.0.1:5000';
+const API_BASE = 'https://phishguard-ai-85s9.onrender.com';
 
 interface AuthUser {
   id: number;

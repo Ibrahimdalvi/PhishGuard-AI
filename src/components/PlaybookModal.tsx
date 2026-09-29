@@ -114,3 +114,4 @@ export default function PlaybookModal({ playbook, onClose }: PlaybookModalProps)
     </div>
   );
 }
+

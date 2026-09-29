@@ -328,3 +328,4 @@ export const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
     }
   }
 ];
+
