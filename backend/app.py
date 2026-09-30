@@ -45,7 +45,19 @@ from ai_assistant import answer_chat
 # =============================================================================
 
 app = Flask(__name__)
-CORS(app)
+
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": [
+                "https://phishguard-ai-alpha-nine.vercel.app"
+            ]
+        }
+    },
+    methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 initialize_database()
 
