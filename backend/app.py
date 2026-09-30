@@ -50,9 +50,7 @@ CORS(
     app,
     resources={
         r"/api/*": {
-            "origins": [
-                "https://phishguard-ai-alpha-nine.vercel.app"
-            ]
+            "origins": "*"
         }
     },
     methods=["GET", "POST", "DELETE", "OPTIONS"],
